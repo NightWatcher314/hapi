@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { SSEManager } from '../../sse/sseManager'
 import type { SyncEngine } from '../../sync/syncEngine'
+import type { OpenClawChatService } from '../../openclaw/types'
 import type { VisibilityState } from '../../visibility/visibilityTracker'
 import type { VisibilityTracker } from '../../visibility/visibilityTracker'
 import type { WebAppEnv } from '../middleware/auth'
@@ -35,11 +36,12 @@ const visibilitySchema = z.object({
 export function createEventsRoutes(
     getSseManager: () => SSEManager | null,
     getSyncEngine: () => SyncEngine | null,
+    getOpenClawChatService: () => OpenClawChatService | null,
     getVisibilityTracker: () => VisibilityTracker | null
 ): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    app.get('/events', (c) => {
+    app.get('/events', async (c) => {
         const manager = getSseManager()
         if (!manager) {
             return c.json({ error: 'Not connected' }, 503)
@@ -49,9 +51,11 @@ export function createEventsRoutes(
         const all = parseBoolean(query.all)
         const sessionId = parseOptionalId(query.sessionId)
         const machineId = parseOptionalId(query.machineId)
+        const openclawConversationId = parseOptionalId(query.openclawConversationId)
         const subscriptionId = randomUUID()
         const visibility = parseVisibility(query.visibility)
         const namespace = c.get('namespace')
+        const userKey = `${namespace}:${c.get('userId')}`
         let resolvedSessionId = sessionId
 
         if (sessionId || machineId) {
@@ -77,6 +81,21 @@ export function createEventsRoutes(
             }
         }
 
+        if (openclawConversationId) {
+            const service = getOpenClawChatService()
+            if (!service) {
+                return c.json({ error: 'OpenClaw service unavailable' }, 503)
+            }
+            const allowed = await service.verifyConversationAccess({
+                namespace,
+                userKey,
+                conversationId: openclawConversationId
+            })
+            if (!allowed) {
+                return c.json({ error: 'Conversation not found' }, 404)
+            }
+        }
+
         return streamSSE(c, async (stream) => {
             manager.subscribe({
                 id: subscriptionId,
@@ -84,6 +103,7 @@ export function createEventsRoutes(
                 all,
                 sessionId: resolvedSessionId,
                 machineId,
+                openclawConversationId,
                 visibility,
                 send: (event) => stream.writeSSE({ data: JSON.stringify(event) }),
                 sendHeartbeat: async () => {

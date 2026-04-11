@@ -13,12 +13,15 @@ import { createBindRoutes } from './routes/bind'
 import { createEventsRoutes } from './routes/events'
 import { createSessionsRoutes } from './routes/sessions'
 import { createMessagesRoutes } from './routes/messages'
+import { createOpenClawIngressRoutes } from './routes/openclawIngress'
+import { createOpenClawRoutes } from './routes/openclaw'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createPushRoutes } from './routes/push'
 import { createVoiceRoutes } from './routes/voice'
+import type { OpenClawChatService } from '../openclaw/types'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer } from 'bun'
@@ -56,6 +59,7 @@ function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
 
 function createWebApp(options: {
     getSyncEngine: () => SyncEngine | null
+    getOpenClawChatService: () => OpenClawChatService | null
     getSseManager: () => SSEManager | null
     getVisibilityTracker: () => VisibilityTracker | null
     jwtSecret: Uint8Array
@@ -87,9 +91,16 @@ function createWebApp(options: {
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
+    app.route('/api', createOpenClawIngressRoutes(options.getOpenClawChatService))
 
     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
-    app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
+    app.route('/api', createEventsRoutes(
+        options.getSseManager,
+        options.getSyncEngine,
+        options.getOpenClawChatService,
+        options.getVisibilityTracker
+    ))
+    app.route('/api', createOpenClawRoutes(options.getOpenClawChatService))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
@@ -203,6 +214,7 @@ from GitHub Pages instead of through the relay tunnel.
 
 export async function startWebServer(options: {
     getSyncEngine: () => SyncEngine | null
+    getOpenClawChatService: () => OpenClawChatService | null
     getSseManager: () => SSEManager | null
     getVisibilityTracker: () => VisibilityTracker | null
     jwtSecret: Uint8Array
@@ -217,6 +229,7 @@ export async function startWebServer(options: {
     const embeddedAssetMap = isCompiled ? await loadEmbeddedAssetMap() : null
     const app = createWebApp({
         getSyncEngine: options.getSyncEngine,
+        getOpenClawChatService: options.getOpenClawChatService,
         getSseManager: options.getSseManager,
         getVisibilityTracker: options.getVisibilityTracker,
         jwtSecret: options.jwtSecret,

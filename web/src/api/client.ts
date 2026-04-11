@@ -10,6 +10,11 @@ import type {
     MachinePathsExistsResponse,
     MachinesResponse,
     MessagesResponse,
+    OpenClawApprovalActionResponse,
+    OpenClawConversationResponse,
+    OpenClawMessagesResponse,
+    OpenClawSendMessageResponse,
+    OpenClawStateResponse,
     PermissionMode,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
@@ -158,6 +163,65 @@ export class ApiClient {
 
     async getSessions(): Promise<SessionsResponse> {
         return await this.request<SessionsResponse>('/api/sessions')
+    }
+
+    async getOpenClawConversation(): Promise<OpenClawConversationResponse> {
+        return await this.request<OpenClawConversationResponse>('/api/openclaw/conversation')
+    }
+
+    async getOpenClawMessages(
+        conversationId: string,
+        options: { beforeSeq?: number | null; limit?: number } = {}
+    ): Promise<OpenClawMessagesResponse> {
+        const params = new URLSearchParams()
+        params.set('conversationId', conversationId)
+        if (options.beforeSeq !== undefined && options.beforeSeq !== null) {
+            params.set('beforeSeq', `${options.beforeSeq}`)
+        }
+        if (options.limit !== undefined && options.limit !== null) {
+            params.set('limit', `${options.limit}`)
+        }
+        return await this.request<OpenClawMessagesResponse>(`/api/openclaw/messages?${params.toString()}`)
+    }
+
+    async getOpenClawState(conversationId: string): Promise<OpenClawStateResponse> {
+        const params = new URLSearchParams()
+        params.set('conversationId', conversationId)
+        return await this.request<OpenClawStateResponse>(`/api/openclaw/state?${params.toString()}`)
+    }
+
+    async sendOpenClawMessage(
+        conversationId: string,
+        text: string
+    ): Promise<OpenClawSendMessageResponse> {
+        return await this.request<OpenClawSendMessageResponse>('/api/openclaw/messages', {
+            method: 'POST',
+            body: JSON.stringify({ conversationId, text })
+        })
+    }
+
+    async approveOpenClawRequest(
+        conversationId: string,
+        requestId: string
+    ): Promise<OpenClawApprovalActionResponse> {
+        const params = new URLSearchParams()
+        params.set('conversationId', conversationId)
+        return await this.request<OpenClawApprovalActionResponse>(
+            `/api/openclaw/approvals/${encodeURIComponent(requestId)}/approve?${params.toString()}`,
+            { method: 'POST' }
+        )
+    }
+
+    async denyOpenClawRequest(
+        conversationId: string,
+        requestId: string
+    ): Promise<OpenClawApprovalActionResponse> {
+        const params = new URLSearchParams()
+        params.set('conversationId', conversationId)
+        return await this.request<OpenClawApprovalActionResponse>(
+            `/api/openclaw/approvals/${encodeURIComponent(requestId)}/deny?${params.toString()}`,
+            { method: 'POST' }
+        )
     }
 
     async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {

@@ -1,5 +1,8 @@
 import type {
     DecryptedMessage as ProtocolDecryptedMessage,
+    OpenClawConversationSummary,
+    OpenClawMessage,
+    OpenClawState,
     Session,
     SessionSummary,
     SyncEvent as ProtocolSyncEvent,
@@ -210,6 +213,33 @@ export type PushUnsubscribePayload = {
 
 export type PushVapidPublicKeyResponse = {
     publicKey: string
+}
+
+export type OpenClawConversationResponse = {
+    conversation: OpenClawConversationSummary
+}
+
+export type OpenClawMessagesResponse = {
+    messages: OpenClawMessage[]
+    page: {
+        limit: number
+        beforeSeq: number | null
+        nextBeforeSeq: number | null
+        hasMore: boolean
+    }
+}
+
+export type OpenClawStateResponse = {
+    state: OpenClawState
+}
+
+export type OpenClawSendMessageResponse = {
+    ok: true
+    message: OpenClawMessage
+}
+
+export type OpenClawApprovalActionResponse = {
+    ok: true
 }
 
 export type VisibilityPayload = {

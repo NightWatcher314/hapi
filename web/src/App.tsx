@@ -11,6 +11,7 @@ import { useSyncingState } from '@/hooks/useSyncingState'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
+import { useOpenClawConversation } from '@/hooks/queries/useOpenClawConversation'
 import { queryKeys } from '@/lib/query-keys'
 import { AppContextProvider } from '@/lib/app-context'
 import { fetchLatestMessages } from '@/lib/message-window-store'
@@ -119,6 +120,12 @@ function AppInner() {
     const queryClient = useQueryClient()
     const sessionMatch = matchRoute({ to: '/sessions/$sessionId' })
     const selectedSessionId = sessionMatch && sessionMatch.sessionId !== 'new' ? sessionMatch.sessionId : null
+    const isOpenClawHome = pathname === '/'
+    const { conversation: openClawConversation } = useOpenClawConversation(
+        api,
+        Boolean(api && token && isOpenClawHome)
+    )
+    const openclawConversationId = isOpenClawHome ? openClawConversation?.id ?? null : null
     const { isSyncing, startSync, endSync } = useSyncingState()
     const [sseDisconnected, setSseDisconnected] = useState(false)
     const [sseDisconnectReason, setSseDisconnectReason] = useState<string | null>(null)
@@ -204,6 +211,13 @@ function AppInner() {
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
             ...(selectedSessionId ? [
                 queryClient.invalidateQueries({ queryKey: queryKeys.session(selectedSessionId) })
+            ] : []),
+            ...(isOpenClawHome ? [
+                queryClient.invalidateQueries({ queryKey: queryKeys.openclawConversation }),
+                ...(openclawConversationId ? [
+                    queryClient.invalidateQueries({ queryKey: queryKeys.openclawMessages(openclawConversationId) }),
+                    queryClient.invalidateQueries({ queryKey: queryKeys.openclawState(openclawConversationId) })
+                ] : [])
             ] : [])
         ]
         const refreshMessages = (selectedSessionId && api)
@@ -219,7 +233,7 @@ function AppInner() {
                     endSync()
                 }
             })
-    }, [api, queryClient, selectedSessionId, startSync, endSync])
+    }, [api, endSync, isOpenClawHome, openclawConversationId, queryClient, selectedSessionId, startSync])
 
     const handleSseDisconnect = useCallback((reason: string) => {
         // Only show reconnecting banner if we've already connected once
@@ -243,8 +257,11 @@ function AppInner() {
         if (selectedSessionId) {
             return { sessionId: selectedSessionId }
         }
+        if (openclawConversationId) {
+            return { openclawConversationId }
+        }
         return { all: true }
-    }, [selectedSessionId])
+    }, [openclawConversationId, selectedSessionId])
 
     const { subscriptionId } = useSSE({
         enabled: Boolean(api && token),

@@ -22,6 +22,9 @@ import { getOrCreateVapidKeys } from './config/vapidKeys'
 import { PushService } from './push/pushService'
 import { PushNotificationChannel } from './push/pushNotificationChannel'
 import { VisibilityTracker } from './visibility/visibilityTracker'
+import { createOpenClawClient } from './openclaw/client'
+import { DefaultOpenClawChatService } from './openclaw/OpenClawChatService'
+import type { OpenClawChatService } from './openclaw/types'
 import { TunnelManager } from './tunnel'
 import { waitForTunnelTlsReady } from './tunnel/tlsGate'
 import QRCode from 'qrcode'
@@ -104,6 +107,7 @@ let sseManager: SSEManager | null = null
 let visibilityTracker: VisibilityTracker | null = null
 let notificationHub: NotificationHub | null = null
 let tunnelManager: TunnelManager | null = null
+let openClawChatService: OpenClawChatService | null = null
 
 async function main() {
     console.log('HAPI Hub starting...')
@@ -184,6 +188,11 @@ async function main() {
     })
 
     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager)
+    openClawChatService = new DefaultOpenClawChatService(
+        store,
+        sseManager,
+        createOpenClawClient()
+    )
 
     const notificationChannels: NotificationChannel[] = [
         new PushNotificationChannel(pushService, sseManager, visibilityTracker, config.publicUrl)
@@ -208,6 +217,7 @@ async function main() {
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
         getSyncEngine: () => syncEngine,
+        getOpenClawChatService: () => openClawChatService,
         getSseManager: () => sseManager,
         getVisibilityTracker: () => visibilityTracker,
         jwtSecret,

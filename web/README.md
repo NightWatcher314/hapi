@@ -1,9 +1,10 @@
 # hapi-web
 
-React Mini App / PWA for monitoring and controlling hapi sessions.
+React Mini App / PWA for OpenClaw chat and hapi session control.
 
 ## What it does
 
+- OpenClaw chat homepage with inline approval actions.
 - Session list with status, pending approvals, todos, and summaries.
 - Chat view with streaming updates and message sending.
 - Permission approval and denial workflows.
@@ -17,14 +18,14 @@ React Mini App / PWA for monitoring and controlling hapi sessions.
 - When opened inside Telegram, auth uses Telegram WebApp init data.
 - When opened in a normal browser, you can log in with `CLI_API_TOKEN:<namespace>` (or `CLI_API_TOKEN` for the default namespace).
 - The login screen includes a top-right hub picker; if unset, the app uses the same origin it was loaded from.
-- Live updates come from the hub via SSE.
+- Live updates come from the hub via SSE for both sessions and OpenClaw conversation events.
 
 ## Routes
 
 See `src/router.tsx` for route definitions.
 
-- `/` - Redirect to /sessions.
-- `/sessions` - Session list.
+- `/` - OpenClaw chat homepage.
+- `/sessions` - Session list and secondary operator entrypoint.
 - `/sessions/$sessionId` - Chat interface.
 - `/sessions/new` - Create new session.
 - `/sessions/$sessionId/files` - File browser with git status.
@@ -33,6 +34,13 @@ See `src/router.tsx` for route definitions.
 - `/settings` - Application settings.
 
 ## Features
+
+### OpenClaw homepage (`src/components/OpenClawChat/`)
+
+- Default OpenClaw conversation bootstrap through hapi hub.
+- Inline message thread for assistant, user, and system messages.
+- Approval cards with approve and deny actions.
+- Secondary navigation back to `/sessions`.
 
 ### Session list (`src/components/SessionList.tsx`)
 
@@ -105,6 +113,7 @@ See `src/hooks/useSSE.ts`.
 
 - SSE connection to `/api/events`.
 - Session/message/machine update events.
+- OpenClaw conversation/message/state/approval events.
 - Automatic cache invalidation on events.
 
 ## Stack

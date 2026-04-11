@@ -17,6 +17,7 @@ type SSESubscription = {
     all?: boolean
     sessionId?: string
     machineId?: string
+    openclawConversationId?: string
 }
 
 type VisibilityState = 'visible' | 'hidden'
@@ -163,6 +164,9 @@ function buildEventsUrl(
     if (subscription.machineId) {
         params.set('machineId', subscription.machineId)
     }
+    if (subscription.openclawConversationId) {
+        params.set('openclawConversationId', subscription.openclawConversationId)
+    }
 
     const path = `/api/events?${params.toString()}`
     try {
@@ -225,8 +229,8 @@ export function useSSE(options: {
     const subscription = options.subscription ?? {}
 
     const subscriptionKey = useMemo(() => {
-        return `${subscription.all ? '1' : '0'}|${subscription.sessionId ?? ''}|${subscription.machineId ?? ''}`
-    }, [subscription.all, subscription.sessionId, subscription.machineId])
+        return `${subscription.all ? '1' : '0'}|${subscription.sessionId ?? ''}|${subscription.machineId ?? ''}|${subscription.openclawConversationId ?? ''}`
+    }, [subscription.all, subscription.sessionId, subscription.machineId, subscription.openclawConversationId])
 
     useEffect(() => {
         if (!options.enabled) {
@@ -349,6 +353,12 @@ export function useSSE(options: {
         const queueMachinesInvalidation = () => {
             pendingInvalidationsRef.current.machines = true
             scheduleInvalidationFlush()
+        }
+
+        const queueOpenClawInvalidation = (conversationId: string) => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.openclawMessages(conversationId) })
+            void queryClient.invalidateQueries({ queryKey: queryKeys.openclawState(conversationId) })
+            void queryClient.invalidateQueries({ queryKey: queryKeys.openclawConversation })
         }
 
         const upsertSessionSummary = (session: Session) => {
@@ -540,6 +550,15 @@ export function useSSE(options: {
                 } else if (!hasRecordShape(event.data) || typeof event.data.activeAt !== 'number') {
                     queueMachinesInvalidation()
                 }
+            }
+
+            if (
+                event.type === 'openclaw-message'
+                || event.type === 'openclaw-state'
+                || event.type === 'openclaw-approval-request'
+                || event.type === 'openclaw-approval-resolved'
+            ) {
+                queueOpenClawInvalidation(event.conversationId)
             }
 
             onEventRef.current(event)

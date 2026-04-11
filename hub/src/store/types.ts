@@ -61,6 +61,43 @@ export type StoredPushSubscription = {
     createdAt: number
 }
 
+export type StoredOpenClawConversation = {
+    id: string
+    namespace: string
+    userKey: string
+    externalId: string
+    title: string | null
+    status: string
+    connected: boolean
+    thinking: boolean
+    lastError: string | null
+    createdAt: number
+    updatedAt: number
+}
+
+export type StoredOpenClawMessage = {
+    id: string
+    conversationId: string
+    namespace: string
+    externalId: string | null
+    role: string
+    text: string
+    createdAt: number
+    seq: number
+    status: string | null
+}
+
+export type StoredOpenClawApproval = {
+    id: string
+    conversationId: string
+    namespace: string
+    title: string
+    description: string | null
+    status: string
+    createdAt: number
+    resolvedAt: number | null
+}
+
 export type VersionedUpdateResult<T> =
     | { result: 'success'; version: number; value: T }
     | { result: 'version-mismatch'; version: number; value: T }

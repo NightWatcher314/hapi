@@ -118,4 +118,78 @@ describe('SSEManager namespace filtering', () => {
         expect(received).toHaveLength(1)
         expect(received[0]?.id).toBe('visible')
     })
+
+    it('routes openclaw events to matching conversation subscriptions', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: SyncEvent[] = []
+
+        manager.subscribe({
+            id: 'openclaw',
+            namespace: 'alpha',
+            openclawConversationId: 'conv-1',
+            send: (event) => {
+                received.push(event)
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.broadcast({
+            type: 'openclaw-message',
+            namespace: 'alpha',
+            conversationId: 'conv-1',
+            message: {
+                id: 'msg-1',
+                conversationId: 'conv-1',
+                role: 'assistant',
+                text: 'hello',
+                createdAt: 1,
+                status: 'completed'
+            }
+        })
+
+        expect(received).toHaveLength(1)
+    })
+
+    it('does not send openclaw events to namespace-wide subscriptions', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const allReceived: SyncEvent[] = []
+        const openclawReceived: SyncEvent[] = []
+
+        manager.subscribe({
+            id: 'all',
+            namespace: 'alpha',
+            all: true,
+            send: (event) => {
+                allReceived.push(event)
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.subscribe({
+            id: 'openclaw',
+            namespace: 'alpha',
+            openclawConversationId: 'conv-1',
+            send: (event) => {
+                openclawReceived.push(event)
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.broadcast({
+            type: 'openclaw-message',
+            namespace: 'alpha',
+            conversationId: 'conv-1',
+            message: {
+                id: 'msg-1',
+                conversationId: 'conv-1',
+                role: 'assistant',
+                text: 'secret',
+                createdAt: 1,
+                status: 'completed'
+            }
+        })
+
+        expect(allReceived).toHaveLength(0)
+        expect(openclawReceived).toHaveLength(1)
+    })
 })

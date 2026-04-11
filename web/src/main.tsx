@@ -30,7 +30,7 @@ function getDeepLinkedSessionId(): string | null {
 
 function getInitialPath(): string {
     const sessionId = getDeepLinkedSessionId()
-    return sessionId ? `/sessions/${sessionId}` : '/sessions'
+    return sessionId ? `/sessions/${sessionId}` : '/'
 }
 
 async function bootstrap() {

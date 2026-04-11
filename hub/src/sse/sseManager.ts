@@ -8,6 +8,7 @@ export type SSESubscription = {
     all: boolean
     sessionId: string | null
     machineId: string | null
+    openclawConversationId: string | null
 }
 
 type SSEConnection = SSESubscription & {
@@ -32,6 +33,7 @@ export class SSEManager {
         all?: boolean
         sessionId?: string | null
         machineId?: string | null
+        openclawConversationId?: string | null
         visibility?: VisibilityState
         send: (event: SyncEvent) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
@@ -42,6 +44,7 @@ export class SSEManager {
             all: Boolean(options.all),
             sessionId: options.sessionId ?? null,
             machineId: options.machineId ?? null,
+            openclawConversationId: options.openclawConversationId ?? null,
             send: options.send,
             sendHeartbeat: options.sendHeartbeat
         }
@@ -58,7 +61,8 @@ export class SSEManager {
             namespace: subscription.namespace,
             all: subscription.all,
             sessionId: subscription.sessionId,
-            machineId: subscription.machineId
+            machineId: subscription.machineId,
+            openclawConversationId: subscription.openclawConversationId
         }
     }
 
@@ -155,16 +159,25 @@ export class SSEManager {
             }
         }
 
-        if (event.type === 'message-received') {
-            return connection.sessionId === event.sessionId
-        }
-
         if (event.type === 'connection-changed') {
             return true
         }
 
+        if (
+            event.type === 'openclaw-message'
+            || event.type === 'openclaw-state'
+            || event.type === 'openclaw-approval-request'
+            || event.type === 'openclaw-approval-resolved'
+        ) {
+            return connection.openclawConversationId === event.conversationId
+        }
+
         if (connection.all) {
             return true
+        }
+
+        if (event.type === 'message-received') {
+            return connection.sessionId === event.sessionId
         }
 
         if ('sessionId' in event && connection.sessionId === event.sessionId) {

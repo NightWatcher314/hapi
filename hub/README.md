@@ -5,6 +5,7 @@ Telegram bot + HTTP API + realtime updates for hapi hub.
 ## What it does
 
 - Telegram bot for notifications and the Mini App entrypoint.
+- OpenClaw chat proxy endpoints for the web homepage.
 - HTTP API for sessions, messages, permissions, machines, and files.
 - Server-Sent Events stream for live updates in the web app.
 - Socket.IO channel for CLI connections.
@@ -41,6 +42,7 @@ See `src/configuration.ts` for all options.
 - `HAPI_RELAY_AUTH` - Relay auth key (default: hapi).
 - `HAPI_RELAY_FORCE_TCP` - Force TCP relay mode (true/1).
 - `VAPID_SUBJECT` - Contact email/URL for Web Push.
+- `OPENCLAW_CHANNEL_TOKEN` - Optional shared secret for unauthenticated `POST /api/openclaw/channel/events` ingress via `x-openclaw-token`.
 
 ## Running
 
@@ -123,6 +125,16 @@ See `src/web/routes/` for all endpoints.
 - `GET /api/events` - SSE stream for live updates.
 - `POST /api/visibility` - Report client visibility state.
 
+### OpenClaw (`src/web/routes/openclaw.ts`, `src/web/routes/openclawIngress.ts`)
+
+- `GET /api/openclaw/conversation` - Get or create the authenticated user’s default OpenClaw conversation.
+- `GET /api/openclaw/messages` - Get OpenClaw messages for a conversation.
+- `POST /api/openclaw/messages` - Send a message to OpenClaw through the hub.
+- `GET /api/openclaw/state` - Get connection state and pending approvals for a conversation.
+- `POST /api/openclaw/approvals/:requestId/approve` - Approve an OpenClaw approval request.
+- `POST /api/openclaw/approvals/:requestId/deny` - Deny an OpenClaw approval request.
+- `POST /api/openclaw/channel/events` - Ingest inbound OpenClaw channel events; optional `x-openclaw-token` gate via `OPENCLAW_CHANNEL_TOKEN`.
+
 ### Voice (`src/web/routes/voice.ts`)
 
 - `POST /api/voice/token` - Get ElevenLabs conversation token.
@@ -199,6 +211,10 @@ See `src/sync/syncEngine.ts` for the main session/message manager:
 - Event publishing to SSE and Telegram.
 - Git operations and file search.
 - Activity tracking and timeouts.
+
+OpenClaw chat is a parallel domain, not part of `SyncEngine`. Its hub-side logic lives in `src/openclaw/`, with SQLite persistence in `src/store/openclaw*.ts` and SSE fan-out through `src/sse/sseManager.ts`.
+
+Current transport note: `src/openclaw/client.ts` still uses a deterministic fake client. The hub/web integration, persistence, SSE, and ingress seam are real, but raw OpenClaw gateway protocol wiring has not been added yet.
 
 ## Storage
 

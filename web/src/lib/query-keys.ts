@@ -1,4 +1,7 @@
 export const queryKeys = {
+    openclawConversation: ['openclaw-conversation'] as const,
+    openclawMessages: (conversationId: string) => ['openclaw-messages', conversationId] as const,
+    openclawState: (conversationId: string) => ['openclaw-state', conversationId] as const,
     sessions: ['sessions'] as const,
     session: (sessionId: string) => ['session', sessionId] as const,
     messages: (sessionId: string) => ['messages', sessionId] as const,

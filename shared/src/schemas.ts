@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
+import { OpenClawSyncEventSchema } from './openclaw'
 
 export const PermissionModeSchema = z.enum(PERMISSION_MODES)
 export const CodexCollaborationModeSchema = z.enum(CODEX_COLLABORATION_MODES)
@@ -196,7 +197,7 @@ const MachineChangedSchema = SessionEventBaseSchema.extend({
     machineId: z.string()
 })
 
-export const SyncEventSchema = z.discriminatedUnion('type', [
+const CoreSyncEventSchema = z.discriminatedUnion('type', [
     SessionChangedSchema.extend({
         type: z.literal('session-added'),
         data: z.unknown().optional()
@@ -240,5 +241,7 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
         }).optional()
     })
 ])
+
+export const SyncEventSchema = z.union([CoreSyncEventSchema, OpenClawSyncEventSchema])
 
 export type SyncEvent = z.infer<typeof SyncEventSchema>

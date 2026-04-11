@@ -32,4 +32,16 @@ export type {
     PermissionModeTone
 } from './modes'
 
+export type {
+    OpenClawApprovalRequest,
+    OpenClawApprovalStatus,
+    OpenClawConversationStatus,
+    OpenClawConversationSummary,
+    OpenClawMessage,
+    OpenClawMessageRole,
+    OpenClawMessageStatus,
+    OpenClawState,
+    OpenClawSyncEvent
+} from './openclaw'
+
 export type { ClaudeModelPreset, GeminiModelPreset } from './models'

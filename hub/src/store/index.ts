@@ -4,6 +4,9 @@ import { dirname } from 'node:path'
 
 import { MachineStore } from './machineStore'
 import { MessageStore } from './messageStore'
+import { OpenClawApprovalStore } from './openclawApprovalStore'
+import { OpenClawConversationStore } from './openclawConversationStore'
+import { OpenClawMessageStore } from './openclawMessageStore'
 import { PushStore } from './pushStore'
 import { SessionStore } from './sessionStore'
 import { UserStore } from './userStore'
@@ -11,6 +14,9 @@ import { UserStore } from './userStore'
 export type {
     StoredMachine,
     StoredMessage,
+    StoredOpenClawApproval,
+    StoredOpenClawConversation,
+    StoredOpenClawMessage,
     StoredPushSubscription,
     StoredSession,
     StoredUser,
@@ -18,17 +24,23 @@ export type {
 } from './types'
 export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
+export { OpenClawApprovalStore } from './openclawApprovalStore'
+export { OpenClawConversationStore } from './openclawConversationStore'
+export { OpenClawMessageStore } from './openclawMessageStore'
 export { PushStore } from './pushStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 7
+const SCHEMA_VERSION: number = 9
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
     'messages',
     'users',
-    'push_subscriptions'
+    'push_subscriptions',
+    'openclaw_conversations',
+    'openclaw_messages',
+    'openclaw_approvals'
 ] as const
 
 export class Store {
@@ -38,6 +50,9 @@ export class Store {
     readonly sessions: SessionStore
     readonly machines: MachineStore
     readonly messages: MessageStore
+    readonly openclawConversations: OpenClawConversationStore
+    readonly openclawMessages: OpenClawMessageStore
+    readonly openclawApprovals: OpenClawApprovalStore
     readonly users: UserStore
     readonly push: PushStore
 
@@ -79,6 +94,9 @@ export class Store {
         this.sessions = new SessionStore(this.db)
         this.machines = new MachineStore(this.db)
         this.messages = new MessageStore(this.db)
+        this.openclawConversations = new OpenClawConversationStore(this.db)
+        this.openclawMessages = new OpenClawMessageStore(this.db)
+        this.openclawApprovals = new OpenClawApprovalStore(this.db)
         this.users = new UserStore(this.db)
         this.push = new PushStore(this.db)
     }
@@ -90,77 +108,27 @@ export class Store {
                 this.migrateLegacySchemaIfNeeded()
                 this.createSchema()
                 this.setUserVersion(SCHEMA_VERSION)
+                this.assertRequiredTablesPresent()
                 return
             }
 
             this.createSchema()
             this.setUserVersion(SCHEMA_VERSION)
+            this.assertRequiredTablesPresent()
             return
         }
 
-        if (currentVersion === 1 && SCHEMA_VERSION === 2) {
-            this.migrateFromV1ToV2()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 2 && SCHEMA_VERSION === 3) {
-            this.migrateFromV2ToV3()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 3 && SCHEMA_VERSION === 4) {
-            this.migrateFromV3ToV4()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 4 && SCHEMA_VERSION === 5) {
-            this.migrateFromV4ToV5()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 5 && SCHEMA_VERSION === 6) {
-            this.migrateFromV5ToV6()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 6 && SCHEMA_VERSION === 7) {
-            this.migrateFromV6ToV7()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 4 && SCHEMA_VERSION === 6) {
-            this.migrateFromV4ToV5()
-            this.migrateFromV5ToV6()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 4 && SCHEMA_VERSION === 7) {
-            this.migrateFromV4ToV5()
-            this.migrateFromV5ToV6()
-            this.migrateFromV6ToV7()
-            this.setUserVersion(SCHEMA_VERSION)
-            return
-        }
-
-        if (currentVersion === 5 && SCHEMA_VERSION === 7) {
-            this.migrateFromV5ToV6()
-            this.migrateFromV6ToV7()
-            this.setUserVersion(SCHEMA_VERSION)
+        if (currentVersion === SCHEMA_VERSION) {
+            this.assertRequiredTablesPresent()
             return
         }
 
         if (currentVersion !== SCHEMA_VERSION) {
-            throw this.buildSchemaMismatchError(currentVersion)
+            this.migrateToCurrentSchema(currentVersion)
+            this.setUserVersion(SCHEMA_VERSION)
+            this.assertRequiredTablesPresent()
+            return
         }
-
-        this.assertRequiredTablesPresent()
     }
 
     private createSchema(): void {
@@ -239,6 +207,7 @@ export class Store {
             );
             CREATE INDEX IF NOT EXISTS idx_push_subscriptions_namespace ON push_subscriptions(namespace);
         `)
+        this.createOpenClawTables()
     }
 
     private migrateLegacySchemaIfNeeded(): void {
@@ -360,6 +329,132 @@ export class Store {
         if (!columns.has('model_reasoning_effort')) {
             this.db.exec('ALTER TABLE sessions ADD COLUMN model_reasoning_effort TEXT')
         }
+    }
+
+    private migrateFromV7ToV8(): void {
+        this.createOpenClawTables()
+    }
+
+    private migrateFromV8ToV9(): void {
+        const sessionColumns = this.getSessionColumnNames()
+        if (!sessionColumns.has('model_reasoning_effort')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN model_reasoning_effort TEXT')
+        }
+
+        this.createOpenClawTables()
+
+        const rows = this.db.prepare('PRAGMA table_info(openclaw_conversations)').all() as Array<{ name: string }>
+        const conversationColumns = new Set(rows.map((row) => row.name))
+
+        if (!conversationColumns.has('connected')) {
+            this.db.exec('ALTER TABLE openclaw_conversations ADD COLUMN connected INTEGER NOT NULL DEFAULT 1')
+        }
+        if (!conversationColumns.has('thinking')) {
+            this.db.exec('ALTER TABLE openclaw_conversations ADD COLUMN thinking INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!conversationColumns.has('last_error')) {
+            this.db.exec('ALTER TABLE openclaw_conversations ADD COLUMN last_error TEXT')
+        }
+    }
+
+    private migrateToCurrentSchema(currentVersion: number): void {
+        if (currentVersion > SCHEMA_VERSION) {
+            throw this.buildSchemaMismatchError(currentVersion)
+        }
+
+        let version = currentVersion
+        while (version < SCHEMA_VERSION) {
+            switch (version) {
+                case 1:
+                    this.migrateFromV1ToV2()
+                    version = 2
+                    break
+                case 2:
+                    this.migrateFromV2ToV3()
+                    version = 3
+                    break
+                case 3:
+                    this.migrateFromV3ToV4()
+                    version = 4
+                    break
+                case 4:
+                    this.migrateFromV4ToV5()
+                    version = 5
+                    break
+                case 5:
+                    this.migrateFromV5ToV6()
+                    version = 6
+                    break
+                case 6:
+                    this.migrateFromV6ToV7()
+                    version = 7
+                    break
+                case 7:
+                    this.migrateFromV7ToV8()
+                    version = 8
+                    break
+                case 8:
+                    this.migrateFromV8ToV9()
+                    version = 9
+                    break
+                default:
+                    throw this.buildSchemaMismatchError(currentVersion)
+            }
+        }
+    }
+
+    private createOpenClawTables(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS openclaw_conversations (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                user_key TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                title TEXT,
+                status TEXT NOT NULL,
+                connected INTEGER NOT NULL DEFAULT 1,
+                thinking INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_openclaw_conversations_namespace_user
+                ON openclaw_conversations(namespace, user_key);
+            CREATE INDEX IF NOT EXISTS idx_openclaw_conversations_namespace
+                ON openclaw_conversations(namespace);
+
+            CREATE TABLE IF NOT EXISTS openclaw_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                external_id TEXT,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                status TEXT,
+                FOREIGN KEY (conversation_id) REFERENCES openclaw_conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_openclaw_messages_conversation
+                ON openclaw_messages(conversation_id, seq);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_openclaw_messages_external
+                ON openclaw_messages(conversation_id, external_id)
+                WHERE external_id IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS openclaw_approvals (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                FOREIGN KEY (conversation_id) REFERENCES openclaw_conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_openclaw_approvals_conversation
+                ON openclaw_approvals(conversation_id, status);
+        `)
     }
 
     private getSessionColumnNames(): Set<string> {
