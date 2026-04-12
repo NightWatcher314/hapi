@@ -105,6 +105,29 @@ describe('OpenClaw store', () => {
         expect(messages[0]?.status).toBe('completed')
     })
 
+    it('updates a stored message status in place', () => {
+        const store = new Store(':memory:')
+
+        const conversation = store.openclawConversations.getOrCreateConversation('default', 'default:1', {
+            externalId: 'openclaw:default:1',
+            title: 'OpenClaw'
+        })
+
+        const message = store.openclawMessages.addMessage({
+            conversationId: conversation.id,
+            namespace: 'default',
+            role: 'user',
+            text: 'hello',
+            status: 'failed'
+        })
+
+        const updated = store.openclawMessages.updateStatus('default', message.id, 'completed')
+
+        expect(updated?.id).toBe(message.id)
+        expect(updated?.status).toBe('completed')
+        expect(store.openclawMessages.getMessages('default', conversation.id)[0]?.status).toBe('completed')
+    })
+
     it('appends delta chunks to one logical assistant message row', () => {
         const store = new Store(':memory:')
 

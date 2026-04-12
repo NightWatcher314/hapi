@@ -15,7 +15,7 @@ export function useSendOpenClawMessage(api: ApiClient | null): {
             }
             return await api.sendOpenClawMessage(input.conversationId, input.text)
         },
-        onSuccess: async (_result, input) => {
+        onSettled: async (_result, _error, input) => {
             await Promise.all([
                 queryClient.invalidateQueries({ queryKey: queryKeys.openclawMessages(input.conversationId) }),
                 queryClient.invalidateQueries({ queryKey: queryKeys.openclawState(input.conversationId) })

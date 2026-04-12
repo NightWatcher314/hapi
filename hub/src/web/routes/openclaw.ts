@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
+import { OpenClawUpstreamError } from '../../openclaw/client'
 import type { OpenClawChatService } from '../../openclaw/types'
 import type { WebAppEnv } from '../middleware/auth'
 
@@ -27,6 +28,15 @@ export function createOpenClawRoutes(
         const message = error instanceof Error ? error.message : 'Internal server error'
         if (message === 'Conversation not found' || message === 'Approval request not found') {
             return c.json({ error: message }, 404)
+        }
+        if (error instanceof OpenClawUpstreamError) {
+            if (error.status === 409) {
+                return c.json({
+                    error: error.message,
+                    retryAfterMs: error.retryAfterMs ?? undefined
+                }, 409)
+            }
+            return c.json({ error: error.message }, 502)
         }
         return c.json({ error: 'Internal server error' }, 500)
     }

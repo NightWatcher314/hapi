@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { Hono } from 'hono'
+import { OpenClawUpstreamError } from '../../openclaw/client'
 import type { OpenClawChatService } from '../../openclaw/types'
 import type { WebAppEnv } from '../middleware/auth'
 import { createOpenClawRoutes } from './openclaw'
@@ -82,6 +83,15 @@ function createNotFoundService(): OpenClawChatService {
     }
 }
 
+function createBusyService(): OpenClawChatService {
+    return {
+        ...createService(),
+        async sendMessage() {
+            throw new OpenClawUpstreamError(409, 'Conversation already has an active OpenClaw run', 1000)
+        }
+    }
+}
+
 function createApp(service: OpenClawChatService) {
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
@@ -134,5 +144,24 @@ describe('openclaw routes', () => {
         })
         expect(response.status).toBe(404)
         expect(await response.json()).toEqual({ error: 'Conversation not found' })
+    })
+
+    it('preserves upstream 409 busy errors on send-message', async () => {
+        const response = await createApp(createBusyService()).request('/api/openclaw/messages', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json'
+            },
+            body: JSON.stringify({
+                conversationId: 'conv-1',
+                text: 'hello'
+            })
+        })
+
+        expect(response.status).toBe(409)
+        expect(await response.json()).toEqual({
+            error: 'Conversation already has an active OpenClaw run',
+            retryAfterMs: 1000
+        })
     })
 })

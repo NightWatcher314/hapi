@@ -1,5 +1,16 @@
 import type { OpenClawMessage } from '@hapi/protocol/types'
 import type { ChatBlock } from '@/chat/types'
+import type { MessageStatus } from '@/types/api'
+
+function toUserStatus(status: OpenClawMessage['status']): MessageStatus | undefined {
+    if (status === 'failed') {
+        return 'failed'
+    }
+    if (status === 'completed') {
+        return 'sent'
+    }
+    return undefined
+}
 
 export function openClawMessagesToChatBlocks(messages: OpenClawMessage[]): ChatBlock[] {
     return messages.map((message) => {
@@ -10,6 +21,7 @@ export function openClawMessagesToChatBlocks(messages: OpenClawMessage[]): ChatB
                 localId: null,
                 createdAt: message.createdAt,
                 text: message.text,
+                status: toUserStatus(message.status)
             } satisfies ChatBlock
         }
 

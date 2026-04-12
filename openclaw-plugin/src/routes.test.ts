@@ -2,12 +2,23 @@ import { describe, expect, it } from 'bun:test'
 import { createPluginApp } from './routes'
 import { HapiCallbackClient } from './hapiClient'
 import { MockOpenClawRuntime } from './openclawRuntime'
-import type { OpenClawAdapterRuntime } from './types'
+import type { HapiCallbackEvent, OpenClawAdapterRuntime, PluginCommandAck } from './types'
 
-const stubLogger = {
-    info() {},
-    warn() {},
-    error() {}
+function createLogger() {
+    return {
+        infoMessages: [] as string[],
+        warnMessages: [] as string[],
+        errorMessages: [] as string[],
+        info(message: string) {
+            this.infoMessages.push(message)
+        },
+        warn(message: string) {
+            this.warnMessages.push(message)
+        },
+        error(message: string) {
+            this.errorMessages.push(message)
+        }
+    }
 }
 
 class StubCallbackClient extends HapiCallbackClient {
@@ -17,24 +28,42 @@ class StubCallbackClient extends HapiCallbackClient {
         super('http://127.0.0.1:3006', 'shared-secret')
     }
 
-    override async postEvent(event: unknown): Promise<void> {
+    override async postEvent(event: HapiCallbackEvent): Promise<void> {
         this.events.push(event)
     }
 }
 
-function createApp(runtime: OpenClawAdapterRuntime = new MockOpenClawRuntime('default')) {
-    const callbackClient = new StubCallbackClient()
+class FailingCallbackClient extends HapiCallbackClient {
+    constructor(private readonly errorMessage: string) {
+        super('http://127.0.0.1:3006', 'shared-secret')
+    }
+
+    override async postEvent(_event: HapiCallbackEvent): Promise<void> {
+        throw new Error(this.errorMessage)
+    }
+}
+
+function createApp(
+    runtime: OpenClawAdapterRuntime = new MockOpenClawRuntime('default'),
+    options: {
+        callbackClient?: HapiCallbackClient
+        idempotencyCache?: Map<string, PluginCommandAck>
+    } = {}
+) {
+    const callbackClient = options.callbackClient ?? new StubCallbackClient()
+    const idempotencyCache = options.idempotencyCache ?? new Map()
+    const logger = createLogger()
     const app = createPluginApp({
         sharedSecret: 'plugin-secret',
         namespace: 'default',
         callbackClient,
         runtime,
-        idempotencyCache: new Map(),
+        idempotencyCache,
         prototypeCaptureSessionKey: null,
         prototypeCaptureFileName: 'transcript-capture.jsonl',
-        logger: stubLogger
+        logger
     })
-    return { app, callbackClient }
+    return { app, callbackClient, idempotencyCache, logger }
 }
 
 class BusyRuntime implements OpenClawAdapterRuntime {
@@ -58,6 +87,52 @@ class BusyRuntime implements OpenClawAdapterRuntime {
 
     async deny(): Promise<void> {
         throw new Error('deny should not be called')
+    }
+}
+
+class ApprovalRuntime implements OpenClawAdapterRuntime {
+    readonly supportsApprovals = true
+
+    constructor(
+        private readonly mode: 'ok' | 'fail-approve' | 'fail-deny' = 'ok'
+    ) {}
+
+    async ensureDefaultConversation(): Promise<{ conversationId: string; title: string }> {
+        return { conversationId: 'thread-1', title: 'OpenClaw' }
+    }
+
+    async sendMessage(): Promise<void> {
+        throw new Error('sendMessage should not be called')
+    }
+
+    async approve(): Promise<[{ type: 'approval-resolved'; eventId: string; occurredAt: number; namespace: string; conversationId: string; requestId: string; status: 'approved' }]> {
+        if (this.mode === 'fail-approve') {
+            throw new Error('approve failed')
+        }
+        return [{
+            type: 'approval-resolved',
+            eventId: 'evt-approve',
+            occurredAt: 1,
+            namespace: 'default',
+            conversationId: 'thread-1',
+            requestId: 'request-1',
+            status: 'approved'
+        }]
+    }
+
+    async deny(): Promise<[{ type: 'approval-resolved'; eventId: string; occurredAt: number; namespace: string; conversationId: string; requestId: string; status: 'denied' }]> {
+        if (this.mode === 'fail-deny') {
+            throw new Error('deny failed')
+        }
+        return [{
+            type: 'approval-resolved',
+            eventId: 'evt-deny',
+            occurredAt: 1,
+            namespace: 'default',
+            conversationId: 'thread-1',
+            requestId: 'request-1',
+            status: 'denied'
+        }]
     }
 }
 
@@ -116,7 +191,7 @@ describe('openclaw plugin routes', () => {
         expect(secondJson.upstreamRequestId).toBe(firstJson.upstreamRequestId)
 
         await new Promise((resolve) => setTimeout(resolve, 0))
-        expect(callbackClient.events.length).toBeGreaterThan(0)
+        expect((callbackClient as StubCallbackClient).events.length).toBeGreaterThan(0)
     })
 
     it('creates approval-request events when message text contains approval', async () => {
@@ -136,7 +211,7 @@ describe('openclaw plugin routes', () => {
         })
 
         await new Promise((resolve) => setTimeout(resolve, 0))
-        expect(callbackClient.events.some((event) => {
+        expect((callbackClient as StubCallbackClient).events.some((event) => {
             return typeof event === 'object'
                 && event !== null
                 && 'type' in event
@@ -202,5 +277,77 @@ describe('openclaw plugin routes', () => {
         expect(await denyResponse.json()).toEqual({
             error: 'OpenClaw approval bridge is not implemented yet'
         })
+    })
+
+    it('logs and clears idempotency cache when approve runtime fails', async () => {
+        const idempotencyCache = new Map()
+        const { app, logger } = createApp(new ApprovalRuntime('fail-approve'), { idempotencyCache })
+
+        const response = await app.request('/hapi/channel/approvals/request-1/approve', {
+            method: 'POST',
+            headers: {
+                authorization: 'Bearer plugin-secret',
+                'content-type': 'application/json',
+                'idempotency-key': 'idem-approve-fail'
+            },
+            body: JSON.stringify({
+                conversationId: 'thread-1'
+            })
+        })
+
+        expect(response.status).toBe(200)
+
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(idempotencyCache.has('idem-approve-fail')).toBe(false)
+        expect(logger.errorMessages.some((message) => message.includes('approve task failed'))).toBe(true)
+    })
+
+    it('logs callback failures without clearing idempotency cache after approve succeeds', async () => {
+        const idempotencyCache = new Map()
+        const { app, logger } = createApp(new ApprovalRuntime(), {
+            idempotencyCache,
+            callbackClient: new FailingCallbackClient('callback offline')
+        })
+
+        const response = await app.request('/hapi/channel/approvals/request-1/approve', {
+            method: 'POST',
+            headers: {
+                authorization: 'Bearer plugin-secret',
+                'content-type': 'application/json',
+                'idempotency-key': 'idem-approve-callback'
+            },
+            body: JSON.stringify({
+                conversationId: 'thread-1'
+            })
+        })
+
+        expect(response.status).toBe(200)
+
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(idempotencyCache.has('idem-approve-callback')).toBe(true)
+        expect(logger.errorMessages.some((message) => message.includes('approve callback failed'))).toBe(true)
+    })
+
+    it('logs and clears idempotency cache when deny runtime fails', async () => {
+        const idempotencyCache = new Map()
+        const { app, logger } = createApp(new ApprovalRuntime('fail-deny'), { idempotencyCache })
+
+        const response = await app.request('/hapi/channel/approvals/request-1/deny', {
+            method: 'POST',
+            headers: {
+                authorization: 'Bearer plugin-secret',
+                'content-type': 'application/json',
+                'idempotency-key': 'idem-deny-fail'
+            },
+            body: JSON.stringify({
+                conversationId: 'thread-1'
+            })
+        })
+
+        expect(response.status).toBe(200)
+
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(idempotencyCache.has('idem-deny-fail')).toBe(false)
+        expect(logger.errorMessages.some((message) => message.includes('deny task failed'))).toBe(true)
     })
 })

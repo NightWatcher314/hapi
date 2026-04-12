@@ -6,7 +6,8 @@ import {
     addOpenClawMessage,
     appendOrReplaceOpenClawMessageContent,
     getOpenClawMaxSeq,
-    getOpenClawMessages
+    getOpenClawMessages,
+    updateOpenClawMessageStatus
 } from './openclawMessages'
 
 export class OpenClawMessageStore {
@@ -51,5 +52,9 @@ export class OpenClawMessageStore {
 
     getMaxSeq(conversationId: string): number {
         return getOpenClawMaxSeq(this.db, conversationId)
+    }
+
+    updateStatus(namespace: string, id: string, status: string | null): StoredOpenClawMessage | null {
+        return updateOpenClawMessageStatus(this.db, namespace, id, status)
     }
 }

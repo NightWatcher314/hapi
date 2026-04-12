@@ -199,10 +199,8 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
             namespace: input.namespace,
             role: 'user',
             text: input.text,
-            status: 'completed'
+            status: 'failed'
         })
-        const userMessage = toMessage(storedUserMessage)
-        this.publisher.message(input.namespace, input.conversationId, userMessage)
 
         const idempotencyKey = randomUUID()
         const command = this.store.openclawCommands.createCommand({
@@ -222,11 +220,6 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
                 idempotencyKey
             })
             if (!ack.accepted) {
-                this.store.openclawCommands.markFailed({
-                    id: command.id,
-                    namespace: input.namespace,
-                    lastError: 'OpenClaw upstream rejected send-message command'
-                })
                 throw new Error('OpenClaw upstream rejected send-message command')
             }
             this.store.openclawCommands.markAccepted({
@@ -240,6 +233,11 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
             })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'OpenClaw upstream request failed'
+            const failedUserMessage = this.store.openclawMessages.updateStatus(
+                input.namespace,
+                storedUserMessage.id,
+                'failed'
+            )
             this.store.openclawCommands.markFailed({
                 id: command.id,
                 namespace: input.namespace,
@@ -253,8 +251,22 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
                 userKey: input.userKey,
                 conversationId: input.conversationId
             })
+            if (failedUserMessage) {
+                this.publisher.message(input.namespace, input.conversationId, toMessage(failedUserMessage))
+            }
             throw error
         }
+
+        const completedUserMessage = this.store.openclawMessages.updateStatus(
+            input.namespace,
+            storedUserMessage.id,
+            'completed'
+        )
+        if (!completedUserMessage) {
+            throw new Error('OpenClaw user message not found while finalizing send-message command')
+        }
+        const userMessage = toMessage(completedUserMessage)
+        this.publisher.message(input.namespace, input.conversationId, userMessage)
 
         await this.publishStateForConversation({
             namespace: input.namespace,

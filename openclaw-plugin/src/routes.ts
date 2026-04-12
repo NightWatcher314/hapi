@@ -22,6 +22,10 @@ function isAuthorized(req: Request, sharedSecret: string): boolean {
     return header === `Bearer ${sharedSecret}`
 }
 
+function formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
 async function dispatchEvents(callbackClient: HapiCallbackClient, events: HapiCallbackEvent[]): Promise<void> {
     for (const event of events) {
         await callbackClient.postEvent(event)
@@ -77,6 +81,48 @@ export function createPluginApp(deps: RouteDeps): Hono {
         return c.json(await deps.runtime.ensureDefaultConversation(body.externalUserKey))
     }
 
+    const queueApprovalTask = (input: {
+        kind: 'approve' | 'deny'
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }) => {
+        queueMicrotask(() => {
+            void (async () => {
+                let events: HapiCallbackEvent[] | void
+                try {
+                    events = input.kind === 'approve'
+                        ? await deps.runtime.approve({
+                            kind: 'approve',
+                            conversationId: input.conversationId,
+                            requestId: input.requestId
+                        })
+                        : await deps.runtime.deny({
+                            kind: 'deny',
+                            conversationId: input.conversationId,
+                            requestId: input.requestId
+                        })
+                } catch (error) {
+                    deps.idempotencyCache.delete(input.idempotencyKey)
+                    deps.logger.error(
+                        `[${deps.namespace}] hapi-openclaw ${input.kind} task failed `
+                        + `conversation=${input.conversationId} requestId=${input.requestId}: ${formatError(error)}`
+                    )
+                    return
+                }
+
+                try {
+                    await dispatchMaybeEvents(deps.callbackClient, events)
+                } catch (error) {
+                    deps.logger.error(
+                        `[${deps.namespace}] hapi-openclaw ${input.kind} callback failed `
+                        + `conversation=${input.conversationId} requestId=${input.requestId}: ${formatError(error)}`
+                    )
+                }
+            })()
+        })
+    }
+
     const sendMessageHandler = async (c: Context) => {
         const idempotencyKey = c.req.header('idempotency-key')
         if (!idempotencyKey) {
@@ -128,7 +174,7 @@ export function createPluginApp(deps: RouteDeps): Hono {
                 }
                 deps.logger.error(
                     `[${deps.namespace}] hapi-openclaw send-message task failed conversation=${body.conversationId}: `
-                    + (error instanceof Error ? error.message : String(error))
+                    + formatError(error)
                 )
             })
         })
@@ -169,14 +215,11 @@ export function createPluginApp(deps: RouteDeps): Hono {
         }
         deps.idempotencyCache.set(idempotencyKey, ack)
 
-        queueMicrotask(() => {
-            void deps.runtime.approve({
-                kind: 'approve',
-                conversationId: body.conversationId!,
-                requestId
-            }).then(async (events) => {
-                await dispatchMaybeEvents(deps.callbackClient, events)
-            }).catch(() => {})
+        queueApprovalTask({
+            kind: 'approve',
+            conversationId: body.conversationId,
+            requestId,
+            idempotencyKey
         })
 
         return c.json(ack)
@@ -215,14 +258,11 @@ export function createPluginApp(deps: RouteDeps): Hono {
         }
         deps.idempotencyCache.set(idempotencyKey, ack)
 
-        queueMicrotask(() => {
-            void deps.runtime.deny({
-                kind: 'deny',
-                conversationId: body.conversationId!,
-                requestId
-            }).then(async (events) => {
-                await dispatchMaybeEvents(deps.callbackClient, events)
-            }).catch(() => {})
+        queueApprovalTask({
+            kind: 'deny',
+            conversationId: body.conversationId,
+            requestId,
+            idempotencyKey
         })
 
         return c.json(ack)

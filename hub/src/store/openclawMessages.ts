@@ -186,6 +186,29 @@ export function getOpenClawMessages(
     return rows.reverse().map(toStoredMessage)
 }
 
+export function updateOpenClawMessageStatus(
+    db: Database,
+    namespace: string,
+    id: string,
+    status: string | null
+): StoredOpenClawMessage | null {
+    db.prepare(`
+        UPDATE openclaw_messages
+        SET status = @status
+        WHERE namespace = @namespace AND id = @id
+    `).run({
+        namespace,
+        id,
+        status
+    })
+
+    const updated = db.prepare(
+        'SELECT * FROM openclaw_messages WHERE namespace = ? AND id = ? LIMIT 1'
+    ).get(namespace, id) as DbMessageRow | undefined
+
+    return updated ? toStoredMessage(updated) : null
+}
+
 export function getOpenClawMaxSeq(db: Database, conversationId: string): number {
     const row = db.prepare(
         'SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM openclaw_messages WHERE conversation_id = ?'

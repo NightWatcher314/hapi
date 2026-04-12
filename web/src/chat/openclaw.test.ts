@@ -10,7 +10,7 @@ describe('openClawMessagesToChatBlocks', () => {
                 role: 'user',
                 text: 'hello',
                 createdAt: 10,
-                status: 'completed'
+                status: 'failed'
             },
             {
                 id: 'assistant-1',
@@ -36,7 +36,8 @@ describe('openClawMessagesToChatBlocks', () => {
                 id: 'user-1',
                 localId: null,
                 createdAt: 10,
-                text: 'hello'
+                text: 'hello',
+                status: 'failed'
             },
             {
                 kind: 'agent-text',
@@ -61,5 +62,25 @@ describe('openClawMessagesToChatBlocks', () => {
                 }
             }
         ])
+    })
+
+    it('maps completed user messages to sent status', () => {
+        const blocks = openClawMessagesToChatBlocks([{
+            id: 'user-1',
+            conversationId: 'conv-1',
+            role: 'user',
+            text: 'hello',
+            createdAt: 10,
+            status: 'completed'
+        }])
+
+        expect(blocks).toEqual([{
+            kind: 'user-text',
+            id: 'user-1',
+            localId: null,
+            createdAt: 10,
+            text: 'hello',
+            status: 'sent'
+        }])
     })
 })

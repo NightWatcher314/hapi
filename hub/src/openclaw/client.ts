@@ -3,6 +3,18 @@ import { randomUUID } from 'node:crypto'
 import { getOpenClawTransportConfig, type OpenClawTransportConfig } from './config'
 import type { OpenClawCommandAck } from './types'
 
+export class OpenClawUpstreamError extends Error {
+    constructor(
+        readonly status: number,
+        message: string,
+        readonly retryAfterMs: number | null = null,
+        readonly body?: string
+    ) {
+        super(message)
+        this.name = 'OpenClawUpstreamError'
+    }
+}
+
 export interface OpenClawClient {
     ensureDefaultConversation(input: { externalUserKey: string }): Promise<{ conversationId: string; title?: string | null }>
     sendMessage(input: {
@@ -136,8 +148,14 @@ class OfficialOpenClawClient implements OpenClawClient {
 
             const bodyText = await response.text()
             if (!response.ok) {
-                const detail = bodyText ? `: ${bodyText}` : ''
-                throw new Error(`OpenClaw upstream request failed with HTTP ${response.status}${detail}`)
+                const parsedBody = parseBodyRecord(bodyText)
+                throw new OpenClawUpstreamError(
+                    response.status,
+                    readString(parsedBody?.error)
+                        ?? `OpenClaw upstream request failed with HTTP ${response.status}`,
+                    readNumber(parsedBody?.retryAfterMs) ?? null,
+                    bodyText || undefined
+                )
             }
 
             if (!bodyText) {
@@ -159,6 +177,19 @@ class OfficialOpenClawClient implements OpenClawClient {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseBodyRecord(bodyText: string): Record<string, unknown> | null {
+    if (!bodyText) {
+        return null
+    }
+
+    try {
+        const parsed = JSON.parse(bodyText) as unknown
+        return isRecord(parsed) ? parsed : null
+    } catch {
+        return null
+    }
 }
 
 function readString(...values: unknown[]): string | null {

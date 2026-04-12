@@ -66,6 +66,7 @@ describe('DefaultOpenClawChatService', () => {
         })
         expect(messagesAfterSend.messages).toHaveLength(1)
         expect(messagesAfterSend.messages[0]?.role).toBe('user')
+        expect(messagesAfterSend.messages[0]?.status).toBe('completed')
 
         const command = store.openclawCommands.getLatestCommand('default', conversation.id)
         expect(command?.status).toBe('accepted')
@@ -216,5 +217,49 @@ describe('DefaultOpenClawChatService', () => {
         const command = store.openclawCommands.getLatestCommand('default', conversation.id)
         expect(command?.status).toBe('failed')
         expect(command?.approvalRequestId).toBe('req-1')
+    })
+
+    it('keeps a failed user message visible when upstream send rejects', async () => {
+        const store = new Store(':memory:')
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const service = new DefaultOpenClawChatService(store, manager, {
+            ...createClient(),
+            async sendMessage() {
+                throw new Error('upstream busy')
+            }
+        })
+
+        const conversation = await service.getOrCreateDefaultConversation({
+            namespace: 'default',
+            userKey: 'default:1'
+        })
+
+        await expect(service.sendMessage({
+            namespace: 'default',
+            conversationId: conversation.id,
+            userKey: 'default:1',
+            text: 'hello'
+        })).rejects.toThrow('upstream busy')
+
+        const messages = await service.listMessages({
+            namespace: 'default',
+            userKey: 'default:1',
+            conversationId: conversation.id,
+            limit: 50
+        })
+        expect(messages.messages).toHaveLength(1)
+        expect(messages.messages[0]?.role).toBe('user')
+        expect(messages.messages[0]?.text).toBe('hello')
+        expect(messages.messages[0]?.status).toBe('failed')
+
+        const command = store.openclawCommands.getLatestCommand('default', conversation.id)
+        expect(command?.status).toBe('failed')
+
+        const state = await service.getState({
+            namespace: 'default',
+            userKey: 'default:1',
+            conversationId: conversation.id
+        })
+        expect(state.lastError).toBe('upstream busy')
     })
 })
