@@ -98,6 +98,32 @@ export type StoredOpenClawApproval = {
     resolvedAt: number | null
 }
 
+export type StoredOpenClawCommand = {
+    id: string
+    namespace: string
+    conversationId: string
+    type: string
+    localMessageId: string | null
+    approvalRequestId: string | null
+    idempotencyKey: string
+    upstreamConversationId: string | null
+    upstreamRequestId: string | null
+    status: string
+    lastError: string | null
+    createdAt: number
+    updatedAt: number
+}
+
+export type StoredOpenClawReceipt = {
+    id: number
+    namespace: string
+    eventId: string
+    upstreamConversationId: string | null
+    eventType: string
+    firstSeenAt: number
+    processedAt: number | null
+}
+
 export type VersionedUpdateResult<T> =
     | { result: 'success'; version: number; value: T }
     | { result: 'version-mismatch'; version: number; value: T }

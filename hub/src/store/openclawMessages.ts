@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite'
 import { randomUUID } from 'node:crypto'
 
+import type { OpenClawMessageContentUpdate } from '../openclaw/types'
 import type { StoredOpenClawMessage } from './types'
 
 type DbMessageRow = {
@@ -102,6 +103,62 @@ export function addOpenClawMessage(
         throw new Error('Failed to create OpenClaw message')
     }
     return toStoredMessage(row)
+}
+
+export function appendOrReplaceOpenClawMessageContent(
+    db: Database,
+    input: {
+        conversationId: string
+        namespace: string
+        externalId: string
+        role: string
+        content: OpenClawMessageContentUpdate
+        createdAt?: number
+        status?: string | null
+    }
+): StoredOpenClawMessage {
+    const existing = db.prepare(
+        'SELECT * FROM openclaw_messages WHERE conversation_id = ? AND external_id = ? LIMIT 1'
+    ).get(input.conversationId, input.externalId) as DbMessageRow | undefined
+
+    if (!existing) {
+        return addOpenClawMessage(db, {
+            conversationId: input.conversationId,
+            namespace: input.namespace,
+            externalId: input.externalId,
+            role: input.role,
+            text: input.content.mode === 'append' ? input.content.delta : input.content.text,
+            createdAt: input.createdAt,
+            status: input.status
+        })
+    }
+
+    const nextText = input.content.mode === 'append'
+        ? `${existing.text}${input.content.delta}`
+        : input.content.text
+
+    db.prepare(`
+        UPDATE openclaw_messages
+        SET role = @role,
+            text = @text,
+            created_at = @created_at,
+            status = @status
+        WHERE id = @id
+    `).run({
+        id: existing.id,
+        role: input.role,
+        text: nextText,
+        created_at: input.createdAt ?? existing.created_at,
+        status: input.status ?? existing.status
+    })
+
+    const updated = db.prepare(
+        'SELECT * FROM openclaw_messages WHERE id = ? LIMIT 1'
+    ).get(existing.id) as DbMessageRow | undefined
+    if (!updated) {
+        throw new Error('Failed to update OpenClaw message content')
+    }
+    return toStoredMessage(updated)
 }
 
 export function getOpenClawMessages(

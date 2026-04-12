@@ -104,4 +104,77 @@ describe('OpenClaw store', () => {
         expect(messages[0]?.text).toBe('final answer')
         expect(messages[0]?.status).toBe('completed')
     })
+
+    it('appends delta chunks to one logical assistant message row', () => {
+        const store = new Store(':memory:')
+
+        const conversation = store.openclawConversations.getOrCreateConversation('default', 'default:1', {
+            externalId: 'openclaw:default:1',
+            title: 'OpenClaw'
+        })
+
+        const first = store.openclawMessages.appendOrReplaceMessageContent({
+            conversationId: conversation.id,
+            namespace: 'default',
+            externalId: 'ext-2',
+            role: 'assistant',
+            content: { mode: 'replace', text: 'hel' },
+            status: 'streaming'
+        })
+
+        const second = store.openclawMessages.appendOrReplaceMessageContent({
+            conversationId: conversation.id,
+            namespace: 'default',
+            externalId: 'ext-2',
+            role: 'assistant',
+            content: { mode: 'append', delta: 'lo' },
+            status: 'completed'
+        })
+
+        expect(second.id).toBe(first.id)
+        expect(second.text).toBe('hello')
+        expect(second.status).toBe('completed')
+    })
+
+    it('stores command and receipt ledgers', () => {
+        const store = new Store(':memory:')
+
+        const conversation = store.openclawConversations.getOrCreateConversation('default', 'default:1', {
+            externalId: 'openclaw:default:1',
+            title: 'OpenClaw'
+        })
+
+        const command = store.openclawCommands.createCommand({
+            namespace: 'default',
+            conversationId: conversation.id,
+            type: 'send-message',
+            localMessageId: 'msg-1',
+            idempotencyKey: 'idem-1',
+            upstreamConversationId: conversation.externalId
+        })
+
+        expect(command.status).toBe('queued')
+        expect(store.openclawCommands.getCommandByIdempotencyKey('default', 'idem-1')?.id).toBe(command.id)
+
+        const accepted = store.openclawCommands.markAccepted({
+            id: command.id,
+            namespace: 'default',
+            upstreamRequestId: 'req-1'
+        })
+        expect(accepted?.status).toBe('accepted')
+        expect(accepted?.upstreamRequestId).toBe('req-1')
+
+        const receipt = store.openclawReceipts.recordReceipt({
+            namespace: 'default',
+            eventId: 'evt-1',
+            upstreamConversationId: conversation.externalId,
+            eventType: 'message'
+        })
+        expect(receipt.processedAt).toBeNull()
+        expect(store.openclawReceipts.hasProcessedReceipt('default', 'evt-1')).toBe(false)
+
+        const processed = store.openclawReceipts.markProcessed('default', 'evt-1')
+        expect(processed?.processedAt).not.toBeNull()
+        expect(store.openclawReceipts.hasProcessedReceipt('default', 'evt-1')).toBe(true)
+    })
 })

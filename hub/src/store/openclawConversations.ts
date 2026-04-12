@@ -109,6 +109,21 @@ export function getOpenClawConversationByExternalId(
     return row ? toStoredConversation(row) : null
 }
 
+export function findOpenClawConversationByExternalId(
+    db: Database,
+    externalId: string
+): StoredOpenClawConversation | null {
+    const rows = db.prepare(
+        'SELECT * FROM openclaw_conversations WHERE external_id = ? LIMIT 2'
+    ).all(externalId) as DbConversationRow[]
+
+    if (rows.length !== 1) {
+        return null
+    }
+
+    return toStoredConversation(rows[0])
+}
+
 export function updateOpenClawConversation(
     db: Database,
     id: string,

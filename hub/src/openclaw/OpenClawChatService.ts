@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type {
     OpenClawApprovalRequest,
     OpenClawConversationSummary,
@@ -104,6 +105,19 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
         return conversation
     }
 
+    private getConversationForInboundEvent(namespace: string, conversationId: string) {
+        return this.store.openclawConversations.getConversationByExternalId(namespace, conversationId)
+            ?? this.store.openclawConversations.getConversationByNamespace(conversationId, namespace)
+    }
+
+    private async publishStateForConversation(input: {
+        namespace: string
+        userKey: string
+        conversationId: string
+    }): Promise<void> {
+        this.publisher.state(input.namespace, input.conversationId, await this.getState(input))
+    }
+
     async getOrCreateDefaultConversation(input: {
         namespace: string
         userKey: string
@@ -190,42 +204,63 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
         const userMessage = toMessage(storedUserMessage)
         this.publisher.message(input.namespace, input.conversationId, userMessage)
 
-        const sendResult = await this.client.sendMessage({
-            conversationId: conversation.externalId,
-            text: input.text
+        const idempotencyKey = randomUUID()
+        const command = this.store.openclawCommands.createCommand({
+            namespace: input.namespace,
+            conversationId: conversation.id,
+            type: 'send-message',
+            localMessageId: storedUserMessage.id,
+            idempotencyKey,
+            upstreamConversationId: conversation.externalId
         })
 
-        for (const assistant of sendResult.assistantMessages ?? []) {
-            const storedAssistant = this.store.openclawMessages.addMessage({
-                conversationId: input.conversationId,
-                namespace: input.namespace,
-                externalId: assistant.externalMessageId ?? null,
-                role: 'assistant',
-                text: assistant.text,
-                createdAt: assistant.createdAt,
-                status: assistant.status ?? 'completed'
+        try {
+            const ack = await this.client.sendMessage({
+                conversationId: conversation.externalId,
+                text: input.text,
+                localMessageId: storedUserMessage.id,
+                idempotencyKey
             })
-            this.publisher.message(input.namespace, input.conversationId, toMessage(storedAssistant))
+            if (!ack.accepted) {
+                this.store.openclawCommands.markFailed({
+                    id: command.id,
+                    namespace: input.namespace,
+                    lastError: 'OpenClaw upstream rejected send-message command'
+                })
+                throw new Error('OpenClaw upstream rejected send-message command')
+            }
+            this.store.openclawCommands.markAccepted({
+                id: command.id,
+                namespace: input.namespace,
+                upstreamConversationId: ack.upstreamConversationId ?? conversation.externalId,
+                upstreamRequestId: ack.upstreamRequestId ?? null
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: null
+            })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'OpenClaw upstream request failed'
+            this.store.openclawCommands.markFailed({
+                id: command.id,
+                namespace: input.namespace,
+                lastError: message
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: message
+            })
+            await this.publishStateForConversation({
+                namespace: input.namespace,
+                userKey: input.userKey,
+                conversationId: input.conversationId
+            })
+            throw error
         }
 
-        for (const approval of sendResult.approvals ?? []) {
-            const storedApproval = this.store.openclawApprovals.upsertApproval({
-                id: approval.id,
-                conversationId: input.conversationId,
-                namespace: input.namespace,
-                title: approval.title,
-                description: approval.description,
-                status: 'pending',
-                createdAt: approval.createdAt
-            })
-            this.publisher.approvalRequest(input.namespace, input.conversationId, toApproval(storedApproval))
-        }
-
-        this.publisher.state(input.namespace, input.conversationId, await this.getState({
+        await this.publishStateForConversation({
             namespace: input.namespace,
             userKey: input.userKey,
             conversationId: input.conversationId
-        }))
+        })
 
         return userMessage
     }
@@ -240,31 +275,62 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
             throw new Error('Approval request not found')
         }
 
-        const result = await this.client.approve({ requestId: input.requestId })
-        this.store.openclawApprovals.resolve(
-            input.namespace,
-            conversation.id,
-            input.requestId,
-            'approved'
-        )
-        if (result.assistantMessage) {
-            const storedAssistant = this.store.openclawMessages.addMessage({
-                conversationId: conversation.id,
-                namespace: input.namespace,
-                externalId: result.assistantMessage.externalMessageId ?? null,
-                role: 'assistant',
-                text: result.assistantMessage.text,
-                createdAt: result.assistantMessage.createdAt
+        const idempotencyKey = randomUUID()
+        const command = this.store.openclawCommands.createCommand({
+            namespace: input.namespace,
+            conversationId: conversation.id,
+            type: 'approve',
+            approvalRequestId: input.requestId,
+            idempotencyKey,
+            upstreamConversationId: conversation.externalId
+        })
+
+        try {
+            const ack = await this.client.approve({
+                conversationId: conversation.externalId,
+                requestId: input.requestId,
+                idempotencyKey
             })
-            this.publisher.message(input.namespace, input.conversationId, toMessage(storedAssistant))
+            if (!ack.accepted) {
+                this.store.openclawCommands.markFailed({
+                    id: command.id,
+                    namespace: input.namespace,
+                    lastError: 'OpenClaw upstream rejected approve command'
+                })
+                throw new Error('OpenClaw upstream rejected approve command')
+            }
+            this.store.openclawCommands.markAccepted({
+                id: command.id,
+                namespace: input.namespace,
+                upstreamConversationId: ack.upstreamConversationId ?? conversation.externalId,
+                upstreamRequestId: ack.upstreamRequestId ?? null
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: null
+            })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'OpenClaw upstream request failed'
+            this.store.openclawCommands.markFailed({
+                id: command.id,
+                namespace: input.namespace,
+                lastError: message
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: message
+            })
+            await this.publishStateForConversation({
+                namespace: input.namespace,
+                userKey: input.userKey,
+                conversationId: input.conversationId
+            })
+            throw error
         }
 
-        this.publisher.approvalResolved(input.namespace, input.conversationId, input.requestId, 'approved')
-        this.publisher.state(input.namespace, input.conversationId, await this.getState({
+        await this.publishStateForConversation({
             namespace: input.namespace,
             userKey: input.userKey,
             conversationId: input.conversationId
-        }))
+        })
     }
 
     async deny(input: { namespace: string; userKey: string; conversationId: string; requestId: string }): Promise<void> {
@@ -277,50 +343,78 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
             throw new Error('Approval request not found')
         }
 
-        const result = await this.client.deny({ requestId: input.requestId })
-        this.store.openclawApprovals.resolve(
-            input.namespace,
-            conversation.id,
-            input.requestId,
-            'denied'
-        )
-        if (result.assistantMessage) {
-            const storedAssistant = this.store.openclawMessages.addMessage({
-                conversationId: conversation.id,
-                namespace: input.namespace,
-                externalId: result.assistantMessage.externalMessageId ?? null,
-                role: 'assistant',
-                text: result.assistantMessage.text,
-                createdAt: result.assistantMessage.createdAt
+        const idempotencyKey = randomUUID()
+        const command = this.store.openclawCommands.createCommand({
+            namespace: input.namespace,
+            conversationId: conversation.id,
+            type: 'deny',
+            approvalRequestId: input.requestId,
+            idempotencyKey,
+            upstreamConversationId: conversation.externalId
+        })
+
+        try {
+            const ack = await this.client.deny({
+                conversationId: conversation.externalId,
+                requestId: input.requestId,
+                idempotencyKey
             })
-            this.publisher.message(input.namespace, input.conversationId, toMessage(storedAssistant))
+            if (!ack.accepted) {
+                this.store.openclawCommands.markFailed({
+                    id: command.id,
+                    namespace: input.namespace,
+                    lastError: 'OpenClaw upstream rejected deny command'
+                })
+                throw new Error('OpenClaw upstream rejected deny command')
+            }
+            this.store.openclawCommands.markAccepted({
+                id: command.id,
+                namespace: input.namespace,
+                upstreamConversationId: ack.upstreamConversationId ?? conversation.externalId,
+                upstreamRequestId: ack.upstreamRequestId ?? null
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: null
+            })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'OpenClaw upstream request failed'
+            this.store.openclawCommands.markFailed({
+                id: command.id,
+                namespace: input.namespace,
+                lastError: message
+            })
+            this.store.openclawConversations.updateConversation(conversation.id, input.namespace, {
+                lastError: message
+            })
+            await this.publishStateForConversation({
+                namespace: input.namespace,
+                userKey: input.userKey,
+                conversationId: input.conversationId
+            })
+            throw error
         }
 
-        this.publisher.approvalResolved(input.namespace, input.conversationId, input.requestId, 'denied')
-        this.publisher.state(input.namespace, input.conversationId, await this.getState({
+        await this.publishStateForConversation({
             namespace: input.namespace,
             userKey: input.userKey,
             conversationId: input.conversationId
-        }))
+        })
     }
 
     async ingestInboundEvent(event: OpenClawInboundEvent): Promise<void> {
         if (event.type === 'message') {
-            const conversation = this.store.openclawConversations.getConversationByExternalId(
-                event.namespace,
-                event.conversationId
-            ) ?? this.store.openclawConversations.getConversationByNamespace(event.conversationId, event.namespace)
+            const conversation = this.getConversationForInboundEvent(event.namespace, event.conversationId)
 
             if (!conversation) {
                 throw new Error('Conversation not found for inbound event')
             }
 
-            const storedMessage = this.store.openclawMessages.addMessage({
+            const storedMessage = this.store.openclawMessages.appendOrReplaceMessageContent({
                 conversationId: conversation.id,
                 namespace: event.namespace,
-                externalId: event.externalMessageId ?? null,
+                externalId: event.externalMessageId,
                 role: event.role ?? 'assistant',
-                text: event.text,
+                content: event.content,
                 createdAt: event.createdAt,
                 status: event.status ?? 'completed'
             })
@@ -329,10 +423,7 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
         }
 
         if (event.type === 'approval-request') {
-            const conversation = this.store.openclawConversations.getConversationByExternalId(
-                event.namespace,
-                event.conversationId
-            ) ?? this.store.openclawConversations.getConversationByNamespace(event.conversationId, event.namespace)
+            const conversation = this.getConversationForInboundEvent(event.namespace, event.conversationId)
 
             if (!conversation) {
                 throw new Error('Conversation not found for approval request')
@@ -348,37 +439,31 @@ export class DefaultOpenClawChatService implements OpenClawChatService {
                 createdAt: event.createdAt
             })
             this.publisher.approvalRequest(event.namespace, conversation.id, toApproval(storedApproval))
-            this.publisher.state(event.namespace, conversation.id, await this.getState({
+            await this.publishStateForConversation({
                 namespace: event.namespace,
                 userKey: conversation.userKey,
                 conversationId: conversation.id
-            }))
+            })
             return
         }
 
         if (event.type === 'approval-resolved') {
-            const conversation = this.store.openclawConversations.getConversationByExternalId(
-                event.namespace,
-                event.conversationId
-            ) ?? this.store.openclawConversations.getConversationByNamespace(event.conversationId, event.namespace)
+            const conversation = this.getConversationForInboundEvent(event.namespace, event.conversationId)
             if (!conversation) {
                 throw new Error('Conversation not found for approval resolution')
             }
 
             this.store.openclawApprovals.resolve(event.namespace, conversation.id, event.requestId, event.status)
             this.publisher.approvalResolved(event.namespace, conversation.id, event.requestId, event.status)
-            this.publisher.state(event.namespace, conversation.id, await this.getState({
+            await this.publishStateForConversation({
                 namespace: event.namespace,
                 userKey: conversation.userKey,
                 conversationId: conversation.id
-            }))
+            })
             return
         }
 
-        const conversation = this.store.openclawConversations.getConversationByExternalId(
-            event.namespace,
-            event.conversationId
-        ) ?? this.store.openclawConversations.getConversationByNamespace(event.conversationId, event.namespace)
+        const conversation = this.getConversationForInboundEvent(event.namespace, event.conversationId)
         if (!conversation) {
             throw new Error('Conversation not found for state event')
         }

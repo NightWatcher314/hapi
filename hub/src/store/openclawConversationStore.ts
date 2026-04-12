@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 
 import type { StoredOpenClawConversation } from './types'
 import {
+    findOpenClawConversationByExternalId,
     getOpenClawConversationByNamespace,
     getOpenClawConversationByExternalId,
     getOpenClawConversationByUserKey,
@@ -34,6 +35,10 @@ export class OpenClawConversationStore {
 
     getConversationByExternalId(namespace: string, externalId: string): StoredOpenClawConversation | null {
         return getOpenClawConversationByExternalId(this.db, namespace, externalId)
+    }
+
+    findConversationByExternalId(externalId: string): StoredOpenClawConversation | null {
+        return findOpenClawConversationByExternalId(this.db, externalId)
     }
 
     updateConversation(

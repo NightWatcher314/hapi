@@ -1,12 +1,26 @@
 import { randomUUID } from 'node:crypto'
 
-import type { OpenClawApprovalResolutionResult, OpenClawSendResult } from './types'
+import { getOpenClawTransportConfig, type OpenClawTransportConfig } from './config'
+import type { OpenClawCommandAck } from './types'
 
 export interface OpenClawClient {
     ensureDefaultConversation(input: { externalUserKey: string }): Promise<{ conversationId: string; title?: string | null }>
-    sendMessage(input: { conversationId: string; text: string }): Promise<OpenClawSendResult>
-    approve(input: { requestId: string }): Promise<OpenClawApprovalResolutionResult>
-    deny(input: { requestId: string }): Promise<OpenClawApprovalResolutionResult>
+    sendMessage(input: {
+        conversationId: string
+        text: string
+        localMessageId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck>
+    approve(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck>
+    deny(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck>
 }
 
 class FakeOpenClawClient implements OpenClawClient {
@@ -17,53 +31,206 @@ class FakeOpenClawClient implements OpenClawClient {
         }
     }
 
-    async sendMessage(input: { conversationId: string; text: string }): Promise<OpenClawSendResult> {
-        const trimmed = input.text.trim()
-
-        if (trimmed.toLowerCase().includes('approval')) {
-            const requestId = randomUUID()
-            return {
-                externalMessageId: randomUUID(),
-                assistantMessages: [{
-                    externalMessageId: randomUUID(),
-                    text: `OpenClaw received your request in ${input.conversationId}. Approval is now required before continuing.`
-                }],
-                approvals: [{
-                    id: requestId,
-                    title: 'Approve OpenClaw action',
-                    description: trimmed
-                }]
-            }
-        }
-
+    async sendMessage(input: {
+        conversationId: string
+        text: string
+        localMessageId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
         return {
-            externalMessageId: randomUUID(),
-            assistantMessages: [{
-                externalMessageId: randomUUID(),
-                text: `OpenClaw echo: ${trimmed || '(empty message)'}`
-            }]
+            accepted: true,
+            upstreamRequestId: `fake-send:${input.idempotencyKey}`,
+            upstreamConversationId: input.conversationId
         }
     }
 
-    async approve(input: { requestId: string }): Promise<OpenClawApprovalResolutionResult> {
+    async approve(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
         return {
-            assistantMessage: {
-                externalMessageId: randomUUID(),
-                text: `OpenClaw approval ${input.requestId} approved.`
-            }
+            accepted: true,
+            upstreamRequestId: `fake-approve:${input.requestId}:${input.idempotencyKey}`,
+            upstreamConversationId: input.conversationId
         }
     }
 
-    async deny(input: { requestId: string }): Promise<OpenClawApprovalResolutionResult> {
+    async deny(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
         return {
-            assistantMessage: {
-                externalMessageId: randomUUID(),
-                text: `OpenClaw approval ${input.requestId} denied.`
-            }
+            accepted: true,
+            upstreamRequestId: `fake-deny:${input.requestId}:${input.idempotencyKey}`,
+            upstreamConversationId: input.conversationId
         }
     }
 }
 
-export function createOpenClawClient(): OpenClawClient {
+class OfficialOpenClawClient implements OpenClawClient {
+    constructor(private readonly config: OpenClawTransportConfig) {}
+
+    async ensureDefaultConversation(input: { externalUserKey: string }): Promise<{ conversationId: string; title?: string | null }> {
+        const body = await this.requestJson('/channel/conversations/default', {
+            method: 'POST',
+            body: JSON.stringify({
+                externalUserKey: input.externalUserKey
+            })
+        })
+
+        const conversationId = readString(body?.conversationId, body?.id)
+        if (!conversationId) {
+            throw new Error('OpenClaw default conversation response missing conversationId')
+        }
+
+        return {
+            conversationId,
+            title: readString(body?.title, body?.name) ?? 'OpenClaw'
+        }
+    }
+
+    async sendMessage(input: {
+        conversationId: string
+        text: string
+        localMessageId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
+        const body = await this.requestJson('/channel/messages', {
+            method: 'POST',
+            headers: {
+                'idempotency-key': input.idempotencyKey
+            },
+            body: JSON.stringify({
+                conversationId: input.conversationId,
+                text: input.text,
+                localMessageId: input.localMessageId
+            })
+        })
+
+        return {
+            accepted: true,
+            upstreamRequestId: readString(body?.requestId, body?.id) ?? randomUUID(),
+            upstreamConversationId: readString(body?.conversationId) ?? input.conversationId,
+            retryAfterMs: readNumber(body?.retryAfterMs) ?? null
+        }
+    }
+
+    async approve(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
+        const body = await this.requestJson(`/channel/approvals/${encodeURIComponent(input.requestId)}/approve`, {
+            method: 'POST',
+            headers: {
+                'idempotency-key': input.idempotencyKey
+            },
+            body: JSON.stringify({
+                conversationId: input.conversationId
+            })
+        })
+
+        return {
+            accepted: true,
+            upstreamRequestId: readString(body?.requestId, body?.id) ?? randomUUID(),
+            upstreamConversationId: readString(body?.conversationId) ?? input.conversationId,
+            retryAfterMs: readNumber(body?.retryAfterMs) ?? null
+        }
+    }
+
+    async deny(input: {
+        conversationId: string
+        requestId: string
+        idempotencyKey: string
+    }): Promise<OpenClawCommandAck> {
+        const body = await this.requestJson(`/channel/approvals/${encodeURIComponent(input.requestId)}/deny`, {
+            method: 'POST',
+            headers: {
+                'idempotency-key': input.idempotencyKey
+            },
+            body: JSON.stringify({
+                conversationId: input.conversationId
+            })
+        })
+
+        return {
+            accepted: true,
+            upstreamRequestId: readString(body?.requestId, body?.id) ?? randomUUID(),
+            upstreamConversationId: readString(body?.conversationId) ?? input.conversationId,
+            retryAfterMs: readNumber(body?.retryAfterMs) ?? null
+        }
+    }
+
+    private async requestJson(pathname: string, init: RequestInit): Promise<Record<string, unknown> | null> {
+        const baseUrl = this.config.apiBaseUrl
+        const apiKey = this.config.apiKey
+        if (!baseUrl || !apiKey) {
+            throw new Error('OpenClaw official transport is missing OPENCLAW_API_BASE_URL or OPENCLAW_API_KEY')
+        }
+
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs)
+        try {
+            const headers = new Headers(init.headers)
+            headers.set('authorization', `Bearer ${apiKey}`)
+            headers.set('content-type', 'application/json')
+
+            const response = await fetch(new URL(pathname, baseUrl).toString(), {
+                ...init,
+                headers,
+                signal: controller.signal
+            })
+
+            const bodyText = await response.text()
+            if (!response.ok) {
+                const detail = bodyText ? `: ${bodyText}` : ''
+                throw new Error(`OpenClaw upstream request failed with HTTP ${response.status}${detail}`)
+            }
+
+            if (!bodyText) {
+                return null
+            }
+
+            const parsed = JSON.parse(bodyText) as unknown
+            return isRecord(parsed) ? parsed : null
+        } catch (error) {
+            if (error instanceof Error && error.name === 'AbortError') {
+                throw new Error(`OpenClaw upstream request timed out after ${this.config.timeoutMs}ms`)
+            }
+            throw error
+        } finally {
+            clearTimeout(timeout)
+        }
+    }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readString(...values: unknown[]): string | null {
+    for (const value of values) {
+        if (typeof value === 'string' && value.length > 0) {
+            return value
+        }
+    }
+    return null
+}
+
+function readNumber(...values: unknown[]): number | null {
+    for (const value of values) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value
+        }
+    }
+    return null
+}
+
+export function createOpenClawClient(config: OpenClawTransportConfig = getOpenClawTransportConfig()): OpenClawClient {
+    if (config.mode === 'official') {
+        return new OfficialOpenClawClient(config)
+    }
     return new FakeOpenClawClient()
 }

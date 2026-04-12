@@ -91,7 +91,7 @@ function createWebApp(options: {
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
-    app.route('/api', createOpenClawIngressRoutes(options.getOpenClawChatService))
+    app.route('/api', createOpenClawIngressRoutes(options.getOpenClawChatService, () => options.store))
 
     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
     app.route('/api', createEventsRoutes(

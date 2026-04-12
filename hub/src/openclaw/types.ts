@@ -15,19 +15,42 @@ export type OpenClawMessagePage = {
     }
 }
 
+export type OpenClawCommandType = 'send-message' | 'approve' | 'deny'
+
+export type OpenClawCommandAck = {
+    accepted: boolean
+    upstreamRequestId?: string | null
+    upstreamConversationId?: string | null
+    retryAfterMs?: number | null
+}
+
+export type OpenClawMessageContentUpdate =
+    | {
+        mode: 'replace'
+        text: string
+    }
+    | {
+        mode: 'append'
+        delta: string
+    }
+
 export type OpenClawInboundEvent =
     | {
         type: 'message'
+        eventId: string
+        occurredAt: number
         namespace: string
         conversationId: string
         role?: 'user' | 'assistant' | 'system'
-        text: string
-        externalMessageId?: string
+        externalMessageId: string
+        content: OpenClawMessageContentUpdate
         createdAt?: number
         status?: 'streaming' | 'completed' | 'failed'
     }
     | {
         type: 'approval-request'
+        eventId: string
+        occurredAt: number
         namespace: string
         conversationId: string
         requestId: string
@@ -37,6 +60,8 @@ export type OpenClawInboundEvent =
     }
     | {
         type: 'approval-resolved'
+        eventId: string
+        occurredAt: number
         namespace: string
         conversationId: string
         requestId: string
@@ -44,36 +69,14 @@ export type OpenClawInboundEvent =
     }
     | {
         type: 'state'
+        eventId: string
+        occurredAt: number
         namespace: string
         conversationId: string
         connected: boolean
         thinking: boolean
         lastError?: string | null
     }
-
-export type OpenClawSendResult = {
-    externalMessageId?: string | null
-    assistantMessages?: Array<{
-        externalMessageId?: string | null
-        text: string
-        createdAt?: number
-        status?: 'streaming' | 'completed' | 'failed'
-    }>
-    approvals?: Array<{
-        id: string
-        title: string
-        description?: string
-        createdAt?: number
-    }>
-}
-
-export type OpenClawApprovalResolutionResult = {
-    assistantMessage?: {
-        externalMessageId?: string | null
-        text: string
-        createdAt?: number
-    }
-}
 
 export interface OpenClawChatService {
     getOrCreateDefaultConversation(input: { namespace: string; userKey: string }): Promise<OpenClawConversationSummary>

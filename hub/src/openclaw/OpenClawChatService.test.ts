@@ -14,19 +14,86 @@ function createClient(): OpenClawClient {
                 title: 'OpenClaw'
             }
         },
-        async sendMessage() {
-            return { assistantMessages: [] }
+        async sendMessage(input) {
+            return {
+                accepted: true,
+                upstreamRequestId: `req:${input.idempotencyKey}`,
+                upstreamConversationId: input.conversationId
+            }
         },
-        async approve() {
-            return {}
+        async approve(input) {
+            return {
+                accepted: true,
+                upstreamRequestId: `approve:${input.idempotencyKey}`,
+                upstreamConversationId: input.conversationId
+            }
         },
-        async deny() {
-            return {}
+        async deny(input) {
+            return {
+                accepted: true,
+                upstreamRequestId: `deny:${input.idempotencyKey}`,
+                upstreamConversationId: input.conversationId
+            }
         }
     }
 }
 
 describe('DefaultOpenClawChatService', () => {
+    it('stores a user message and command ack before assistant events arrive', async () => {
+        const store = new Store(':memory:')
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const service = new DefaultOpenClawChatService(store, manager, createClient())
+
+        const conversation = await service.getOrCreateDefaultConversation({
+            namespace: 'default',
+            userKey: 'default:1'
+        })
+
+        const sent = await service.sendMessage({
+            namespace: 'default',
+            conversationId: conversation.id,
+            userKey: 'default:1',
+            text: 'hello'
+        })
+
+        expect(sent.role).toBe('user')
+
+        const messagesAfterSend = await service.listMessages({
+            namespace: 'default',
+            userKey: 'default:1',
+            conversationId: conversation.id,
+            limit: 50
+        })
+        expect(messagesAfterSend.messages).toHaveLength(1)
+        expect(messagesAfterSend.messages[0]?.role).toBe('user')
+
+        const command = store.openclawCommands.getLatestCommand('default', conversation.id)
+        expect(command?.status).toBe('accepted')
+        expect(command?.localMessageId).toBe(sent.id)
+
+        await service.ingestInboundEvent({
+            type: 'message',
+            eventId: 'evt-1',
+            occurredAt: 1,
+            namespace: 'default',
+            conversationId: conversation.id,
+            externalMessageId: 'ext-1',
+            role: 'assistant',
+            content: { mode: 'replace', text: 'world' },
+            status: 'completed'
+        })
+
+        const messagesAfterEvent = await service.listMessages({
+            namespace: 'default',
+            userKey: 'default:1',
+            conversationId: conversation.id,
+            limit: 50
+        })
+        expect(messagesAfterEvent.messages).toHaveLength(2)
+        expect(messagesAfterEvent.messages[1]?.role).toBe('assistant')
+        expect(messagesAfterEvent.messages[1]?.text).toBe('world')
+    })
+
     it('persists inbound state updates so refetch returns the same values', async () => {
         const store = new Store(':memory:')
         const manager = new SSEManager(0, new VisibilityTracker())
@@ -61,6 +128,8 @@ describe('DefaultOpenClawChatService', () => {
 
         await service.ingestInboundEvent({
             type: 'state',
+            eventId: 'evt-state-1',
+            occurredAt: 1,
             namespace: 'default',
             conversationId: conversation.id,
             connected: false,
@@ -143,5 +212,9 @@ describe('DefaultOpenClawChatService', () => {
         })
         expect(state.pendingApprovals ?? []).toHaveLength(1)
         expect(state.pendingApprovals?.[0]?.id).toBe('req-1')
+
+        const command = store.openclawCommands.getLatestCommand('default', conversation.id)
+        expect(command?.status).toBe('failed')
+        expect(command?.approvalRequestId).toBe('req-1')
     })
 })

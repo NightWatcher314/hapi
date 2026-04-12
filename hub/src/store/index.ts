@@ -5,8 +5,10 @@ import { dirname } from 'node:path'
 import { MachineStore } from './machineStore'
 import { MessageStore } from './messageStore'
 import { OpenClawApprovalStore } from './openclawApprovalStore'
+import { OpenClawCommandStore } from './openclawCommandStore'
 import { OpenClawConversationStore } from './openclawConversationStore'
 import { OpenClawMessageStore } from './openclawMessageStore'
+import { OpenClawReceiptStore } from './openclawReceiptStore'
 import { PushStore } from './pushStore'
 import { SessionStore } from './sessionStore'
 import { UserStore } from './userStore'
@@ -15,8 +17,10 @@ export type {
     StoredMachine,
     StoredMessage,
     StoredOpenClawApproval,
+    StoredOpenClawCommand,
     StoredOpenClawConversation,
     StoredOpenClawMessage,
+    StoredOpenClawReceipt,
     StoredPushSubscription,
     StoredSession,
     StoredUser,
@@ -25,13 +29,15 @@ export type {
 export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
 export { OpenClawApprovalStore } from './openclawApprovalStore'
+export { OpenClawCommandStore } from './openclawCommandStore'
 export { OpenClawConversationStore } from './openclawConversationStore'
 export { OpenClawMessageStore } from './openclawMessageStore'
+export { OpenClawReceiptStore } from './openclawReceiptStore'
 export { PushStore } from './pushStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 9
+const SCHEMA_VERSION: number = 10
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -40,7 +46,9 @@ const REQUIRED_TABLES = [
     'push_subscriptions',
     'openclaw_conversations',
     'openclaw_messages',
-    'openclaw_approvals'
+    'openclaw_approvals',
+    'openclaw_commands',
+    'openclaw_receipts'
 ] as const
 
 export class Store {
@@ -53,6 +61,8 @@ export class Store {
     readonly openclawConversations: OpenClawConversationStore
     readonly openclawMessages: OpenClawMessageStore
     readonly openclawApprovals: OpenClawApprovalStore
+    readonly openclawCommands: OpenClawCommandStore
+    readonly openclawReceipts: OpenClawReceiptStore
     readonly users: UserStore
     readonly push: PushStore
 
@@ -97,6 +107,8 @@ export class Store {
         this.openclawConversations = new OpenClawConversationStore(this.db)
         this.openclawMessages = new OpenClawMessageStore(this.db)
         this.openclawApprovals = new OpenClawApprovalStore(this.db)
+        this.openclawCommands = new OpenClawCommandStore(this.db)
+        this.openclawReceipts = new OpenClawReceiptStore(this.db)
         this.users = new UserStore(this.db)
         this.push = new PushStore(this.db)
     }
@@ -207,7 +219,8 @@ export class Store {
             );
             CREATE INDEX IF NOT EXISTS idx_push_subscriptions_namespace ON push_subscriptions(namespace);
         `)
-        this.createOpenClawTables()
+        this.createOpenClawCoreTables()
+        this.createOpenClawCommandTables()
     }
 
     private migrateLegacySchemaIfNeeded(): void {
@@ -332,16 +345,11 @@ export class Store {
     }
 
     private migrateFromV7ToV8(): void {
-        this.createOpenClawTables()
+        this.createOpenClawCoreTables()
     }
 
     private migrateFromV8ToV9(): void {
-        const sessionColumns = this.getSessionColumnNames()
-        if (!sessionColumns.has('model_reasoning_effort')) {
-            this.db.exec('ALTER TABLE sessions ADD COLUMN model_reasoning_effort TEXT')
-        }
-
-        this.createOpenClawTables()
+        this.createOpenClawCoreTables()
 
         const rows = this.db.prepare('PRAGMA table_info(openclaw_conversations)').all() as Array<{ name: string }>
         const conversationColumns = new Set(rows.map((row) => row.name))
@@ -355,6 +363,17 @@ export class Store {
         if (!conversationColumns.has('last_error')) {
             this.db.exec('ALTER TABLE openclaw_conversations ADD COLUMN last_error TEXT')
         }
+    }
+
+    private migrateFromV9ToV10(): void {
+        const sessionColumns = this.getSessionColumnNames()
+        if (!sessionColumns.has('model_reasoning_effort')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN model_reasoning_effort TEXT')
+        }
+
+        this.createOpenClawCoreTables()
+        this.migrateFromV8ToV9()
+        this.createOpenClawCommandTables()
     }
 
     private migrateToCurrentSchema(currentVersion: number): void {
@@ -397,13 +416,17 @@ export class Store {
                     this.migrateFromV8ToV9()
                     version = 9
                     break
+                case 9:
+                    this.migrateFromV9ToV10()
+                    version = 10
+                    break
                 default:
                     throw this.buildSchemaMismatchError(currentVersion)
             }
         }
     }
 
-    private createOpenClawTables(): void {
+    private createOpenClawCoreTables(): void {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS openclaw_conversations (
                 id TEXT PRIMARY KEY,
@@ -457,6 +480,43 @@ export class Store {
         `)
     }
 
+    private createOpenClawCommandTables(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS openclaw_commands (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                local_message_id TEXT,
+                approval_request_id TEXT,
+                idempotency_key TEXT NOT NULL,
+                upstream_conversation_id TEXT,
+                upstream_request_id TEXT,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES openclaw_conversations(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_openclaw_commands_namespace_idempotency
+                ON openclaw_commands(namespace, idempotency_key);
+            CREATE INDEX IF NOT EXISTS idx_openclaw_commands_conversation
+                ON openclaw_commands(conversation_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS openclaw_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                namespace TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                upstream_conversation_id TEXT,
+                event_type TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                processed_at INTEGER,
+                UNIQUE(namespace, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_openclaw_receipts_namespace_conversation
+                ON openclaw_receipts(namespace, upstream_conversation_id);
+        `)
+    }
     private getSessionColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
         return new Set(rows.map((row) => row.name))
