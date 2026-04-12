@@ -1,0 +1,56 @@
+{
+    "id": "hapi-openclaw",
+    "name": "HAPI OpenClaw Adapter",
+    "description": "Bridge HAPI's OpenClaw UI to an OpenClaw-native plugin route surface.",
+    "uiHints": {
+        "hapiBaseUrl": {
+            "label": "HAPI Base URL",
+            "help": "Base URL for the HAPI hub callback endpoint, for example http://127.0.0.1:3006."
+        },
+        "sharedSecret": {
+            "label": "Shared Secret",
+            "help": "Shared secret used for HAPI bearer auth and plugin callback signing.",
+            "sensitive": true
+        },
+        "namespace": {
+            "label": "Namespace",
+            "help": "Namespace attached to normalized callback events when omitted by HAPI."
+        },
+        "prototypeCaptureSessionKey": {
+            "label": "Prototype Capture Session Key",
+            "help": "Optional OpenClaw session key to record transcript updates for milestone-1 event-shape inspection.",
+            "advanced": true
+        },
+        "prototypeCaptureFileName": {
+            "label": "Prototype Capture File",
+            "help": "Optional file name for transcript-capture JSONL under the plugin state directory.",
+            "advanced": true
+        }
+    },
+    "configSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "hapiBaseUrl": {
+                "type": "string",
+                "minLength": 1
+            },
+            "sharedSecret": {
+                "type": "string",
+                "minLength": 1
+            },
+            "namespace": {
+                "type": "string",
+                "minLength": 1
+            },
+            "prototypeCaptureSessionKey": {
+                "type": "string",
+                "minLength": 1
+            },
+            "prototypeCaptureFileName": {
+                "type": "string",
+                "minLength": 1
+            }
+        }
+    }
+}

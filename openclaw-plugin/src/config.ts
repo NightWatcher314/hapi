@@ -1,27 +1,58 @@
+import type { OpenClawConfig } from 'openclaw/plugin-sdk/plugin-entry'
 import type { PluginConfig } from './types'
+import { OPENCLAW_PLUGIN_ID } from './pluginId'
 
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-    if (!value) {
-        return fallback
+export const PLUGIN_CONFIG_JSON_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+        hapiBaseUrl: { type: 'string', minLength: 1 },
+        sharedSecret: { type: 'string', minLength: 1 },
+        namespace: { type: 'string', minLength: 1 },
+        prototypeCaptureSessionKey: { type: 'string', minLength: 1 },
+        prototypeCaptureFileName: { type: 'string', minLength: 1 }
     }
-    const parsed = Number.parseInt(value, 10)
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+} as const
+
+function readOptionalNonEmptyString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
-function readRequiredEnv(name: string): string {
-    const value = process.env[name]?.trim()
-    if (!value) {
-        throw new Error(`Missing required environment variable ${name}`)
+function readRequiredString(value: unknown, fieldName: string): string {
+    const parsed = readOptionalNonEmptyString(value)
+    if (!parsed) {
+        throw new Error(`Invalid ${OPENCLAW_PLUGIN_ID} config: ${fieldName} must be a non-empty string`)
     }
-    return value
+    return parsed
 }
 
-export function getPluginConfig(): PluginConfig {
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function resolvePluginConfig(value: unknown): PluginConfig {
+    if (!isRecord(value)) {
+        throw new Error(`Invalid ${OPENCLAW_PLUGIN_ID} config: expected an object`)
+    }
+
     return {
-        listenHost: process.env.OPENCLAW_PLUGIN_LISTEN_HOST?.trim() || '127.0.0.1',
-        listenPort: parsePositiveInt(process.env.OPENCLAW_PLUGIN_LISTEN_PORT, 3016),
-        sharedSecret: readRequiredEnv('OPENCLAW_SHARED_SECRET'),
-        hapiBaseUrl: readRequiredEnv('HAPI_BASE_URL'),
-        namespace: process.env.OPENCLAW_PLUGIN_NAMESPACE?.trim() || 'default'
+        hapiBaseUrl: readRequiredString(value.hapiBaseUrl, 'hapiBaseUrl'),
+        sharedSecret: readRequiredString(value.sharedSecret, 'sharedSecret'),
+        namespace: readOptionalNonEmptyString(value.namespace) ?? 'default',
+        prototypeCaptureSessionKey: readOptionalNonEmptyString(value.prototypeCaptureSessionKey),
+        prototypeCaptureFileName: readOptionalNonEmptyString(value.prototypeCaptureFileName) ?? 'transcript-capture.jsonl'
+    }
+}
+
+export function resolvePluginConfigFromOpenClawConfig(config: OpenClawConfig | undefined | null): PluginConfig | null {
+    const pluginConfig = config?.plugins?.entries?.[OPENCLAW_PLUGIN_ID]?.config
+    if (!pluginConfig) {
+        return null
+    }
+
+    try {
+        return resolvePluginConfig(pluginConfig)
+    } catch {
+        return null
     }
 }

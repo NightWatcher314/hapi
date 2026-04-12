@@ -5,7 +5,7 @@
     "scripts": {
         "build:site": "bun run --cwd website build && bun run --cwd docs docs:build && cp -r docs/.vitepress/dist website/dist/public/docs",
         "dev": "concurrently \"bun run dev:hub\" \"bun run dev:web\" --kill-others-on-exit",
-        "dev:openclaw-plugin": "cd openclaw-plugin && bun run dev",
+        "dev:openclaw-plugin": "printf 'Native plugin now loads through OpenClaw. Use: openclaw plugins install -l ./openclaw-plugin && openclaw gateway restart\\n'",
         "build": "bun run build:cli && bun run build:hub && bun run build:web",
         "build:cli": "cd cli && bun run build",
         "build:openclaw-plugin": "cd openclaw-plugin && bun run build",
