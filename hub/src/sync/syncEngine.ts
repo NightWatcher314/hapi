@@ -163,7 +163,16 @@ export class SyncEngine {
 
     handleRealtimeEvent(event: SyncEvent): void {
         if (event.type === 'session-updated' && event.sessionId) {
+            // Snapshot agent session IDs before refresh — safe because JS is single-threaded
+            // and refreshSession replaces the Map entry with a new object.
+            const before = this.sessionCache.getSession(event.sessionId)
             this.sessionCache.refreshSession(event.sessionId)
+            const after = this.sessionCache.getSession(event.sessionId)
+            if (after?.metadata && !this.hasSameAgentSessionIds(before?.metadata ?? null, after.metadata)) {
+                void this.sessionCache.deduplicateByAgentSessionId(event.sessionId).catch(() => {
+                    // best-effort: dedup failure is harmless, web-side safety net hides remaining duplicates
+                })
+            }
             return
         }
 
@@ -197,6 +206,9 @@ export class SyncEngine {
 
     handleSessionEnd(payload: { sid: string; time: number }): void {
         this.sessionCache.handleSessionEnd(payload)
+        // Retry dedup now that this session is inactive — a prior dedup may have
+        // skipped it because it was still active at the time.
+        this.triggerDedupIfNeeded(payload.sid)
     }
 
     handleBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
@@ -208,7 +220,16 @@ export class SyncEngine {
     }
 
     private expireInactive(): void {
-        this.sessionCache.expireInactive()
+        const expired = this.sessionCache.expireInactive()
+        // Sort by most recent first so dedup keeps the newest session when multiple
+        // duplicates for the same agent thread expire in the same sweep.
+        const sorted = expired
+            .map((id) => this.sessionCache.getSession(id))
+            .filter((s): s is NonNullable<typeof s> => s != null)
+            .sort((a, b) => (b.activeAt - a.activeAt) || (b.updatedAt - a.updatedAt))
+        for (const session of sorted) {
+            this.triggerDedupIfNeeded(session.id)
+        }
         this.machineCache.expireInactive()
     }
 
@@ -430,15 +451,41 @@ export class SyncEngine {
         }
 
         if (spawnResult.sessionId !== access.sessionId) {
-            try {
-                await this.sessionCache.mergeSessions(access.sessionId, spawnResult.sessionId, namespace)
-            } catch (error) {
-                const message = error instanceof Error ? error.message : 'Failed to merge resumed session'
-                return { type: 'error', message, code: 'resume_failed' }
+            // The old session may have already been merged by the automatic dedup path
+            // (triggered when the spawned CLI sets its agent session ID in metadata).
+            // Only attempt the explicit merge if the old session still exists.
+            const oldSession = this.sessionCache.getSessionByNamespace(access.sessionId, namespace)
+            if (oldSession) {
+                try {
+                    await this.sessionCache.mergeSessions(access.sessionId, spawnResult.sessionId, namespace)
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : 'Failed to merge resumed session'
+                    return { type: 'error', message, code: 'resume_failed' }
+                }
             }
         }
 
         return { type: 'success', sessionId: spawnResult.sessionId }
+    }
+
+    private hasSameAgentSessionIds(
+        prev: Session['metadata'] | null,
+        next: NonNullable<Session['metadata']>
+    ): boolean {
+        return (prev?.codexSessionId ?? null) === (next.codexSessionId ?? null)
+            && (prev?.claudeSessionId ?? null) === (next.claudeSessionId ?? null)
+            && (prev?.geminiSessionId ?? null) === (next.geminiSessionId ?? null)
+            && (prev?.opencodeSessionId ?? null) === (next.opencodeSessionId ?? null)
+            && (prev?.cursorSessionId ?? null) === (next.cursorSessionId ?? null)
+    }
+
+    private triggerDedupIfNeeded(sessionId: string): void {
+        const session = this.sessionCache.getSession(sessionId)
+        if (session?.metadata) {
+            void this.sessionCache.deduplicateByAgentSessionId(sessionId).catch(() => {
+                // best-effort: web-side safety net hides remaining duplicates
+            })
+        }
     }
 
     async waitForSessionActive(sessionId: string, timeoutMs: number = 15_000): Promise<boolean> {

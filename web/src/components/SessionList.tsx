@@ -39,6 +39,39 @@ function getGroupDisplayName(directory: string): string {
 
 export const UNKNOWN_MACHINE_ID = '__unknown__'
 
+export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
+    const byAgentId = new Map<string, SessionSummary[]>()
+    const result: SessionSummary[] = []
+
+    for (const session of sessions) {
+        const agentId = session.metadata?.agentSessionId
+        if (!agentId) {
+            result.push(session)
+            continue
+        }
+        const group = byAgentId.get(agentId)
+        if (group) {
+            group.push(session)
+        } else {
+            byAgentId.set(agentId, [session])
+        }
+    }
+
+    for (const group of byAgentId.values()) {
+        group.sort((a, b) => {
+            // Active session always wins — it's the live connection
+            if (a.active !== b.active) return a.active ? -1 : 1
+            // Among inactive duplicates, keep the selected one visible
+            if (a.id === selectedSessionId) return -1
+            if (b.id === selectedSessionId) return 1
+            return b.updatedAt - a.updatedAt
+        })
+        result.push(group[0])
+    }
+
+    return result
+}
+
 function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
     const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
 
@@ -453,8 +486,8 @@ export function SessionList(props: {
     const { t } = useTranslation()
     const { renderHeader = true, api, selectedSessionId, machineLabelsById = {} } = props
     const groups = useMemo(
-        () => groupSessionsByDirectory(props.sessions),
-        [props.sessions]
+        () => groupSessionsByDirectory(deduplicateSessionsByAgentId(props.sessions, selectedSessionId)),
+        [props.sessions, selectedSessionId]
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
