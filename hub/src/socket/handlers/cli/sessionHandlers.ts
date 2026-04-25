@@ -9,6 +9,7 @@ import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../.
 import { extractBackgroundTaskDelta } from '../../../sync/backgroundTasks'
 import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
 import type { CliSocketWithData } from '../../socketTypes'
+import type { SessionEndReason } from '@hapi/protocol'
 import type { AccessErrorReason, AccessResult } from './types'
 
 type SessionAlivePayload = {
@@ -26,6 +27,7 @@ type SessionAlivePayload = {
 type SessionEndPayload = {
     sid: string
     time: number
+    reason?: SessionEndReason
 }
 
 type ResolveSessionAccess = (sessionId: string) => AccessResult<StoredSession>
