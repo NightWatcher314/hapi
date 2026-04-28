@@ -20,7 +20,7 @@ import { HappyComposer } from '@/components/AssistantChat/HappyComposer'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { useHappyRuntime } from '@/lib/assistant-runtime'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
-import { findUnsupportedCodexBuiltinSlashCommand } from '@/lib/codexSlashCommands'
+import { findCodexCustomPromptExpansion, findUnsupportedCodexBuiltinSlashCommand } from '@/lib/codexSlashCommands'
 import { useToast } from '@/lib/toast-context'
 import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
@@ -349,7 +349,16 @@ export function SessionChat(props: {
     }, [navigate, props.session.id])
 
     const handleSend = useCallback((text: string, attachments?: AttachmentMetadata[]) => {
+        let textToSend = text
         if (agentFlavor === 'codex') {
+            const customPrompt = findCodexCustomPromptExpansion(
+                text,
+                props.availableSlashCommands ?? []
+            )
+            if (customPrompt) {
+                textToSend = customPrompt
+            }
+
             const unsupportedCommand = findUnsupportedCodexBuiltinSlashCommand(
                 text,
                 props.availableSlashCommands ?? []
@@ -366,7 +375,7 @@ export function SessionChat(props: {
             }
         }
 
-        props.onSend(text, attachments)
+        props.onSend(textToSend, attachments)
         setForceScrollToken((token) => token + 1)
     }, [agentFlavor, props.availableSlashCommands, props.onSend, props.session.id, addToast, haptic, t])
 

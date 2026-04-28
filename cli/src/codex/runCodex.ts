@@ -13,6 +13,7 @@ import { CodexCollaborationModeSchema, PermissionModeSchema } from '@hapi/protoc
 import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import type { ReasoningEffort } from './appServerTypes';
+import { parseCodexSpecialCommand } from './codexSpecialCommands';
 
 export { emitReadyIfIdle } from './utils/emitReadyIfIdle';
 
@@ -120,6 +121,13 @@ export async function runCodex(opts: {
             modelReasoningEffort: currentModelReasoningEffort,
             collaborationMode: currentCollaborationMode
         };
+        const specialCommand = parseCodexSpecialCommand(message.content.text);
+        if (specialCommand.type) {
+            logger.debug(`[Codex] Detected special command: ${specialCommand.type}`);
+            messageQueue.pushIsolateAndClear(message.content.text.trim(), enhancedMode, localId);
+            return;
+        }
+
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
         messageQueue.push(formattedText, enhancedMode, localId);
     });

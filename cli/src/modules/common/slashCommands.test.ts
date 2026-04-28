@@ -6,19 +6,25 @@ import { listSlashCommands } from './slashCommands'
 
 describe('listSlashCommands', () => {
     const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
+    const originalCodexHome = process.env.CODEX_HOME
     let sandboxDir: string
     let claudeConfigDir: string
+    let codexHome: string
     let projectDir: string
 
     beforeEach(async () => {
         sandboxDir = await mkdtemp(join(tmpdir(), 'hapi-slash-commands-'))
         claudeConfigDir = join(sandboxDir, 'global-claude')
+        codexHome = join(sandboxDir, 'global-codex')
         projectDir = join(sandboxDir, 'project')
 
         process.env.CLAUDE_CONFIG_DIR = claudeConfigDir
+        process.env.CODEX_HOME = codexHome
 
         await mkdir(join(claudeConfigDir, 'commands'), { recursive: true })
+        await mkdir(join(codexHome, 'prompts'), { recursive: true })
         await mkdir(join(projectDir, '.claude', 'commands'), { recursive: true })
+        await mkdir(join(projectDir, '.codex', 'prompts'), { recursive: true })
     })
 
     afterEach(async () => {
@@ -26,6 +32,11 @@ describe('listSlashCommands', () => {
             delete process.env.CLAUDE_CONFIG_DIR
         } else {
             process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
+        }
+        if (originalCodexHome === undefined) {
+            delete process.env.CODEX_HOME
+        } else {
+            process.env.CODEX_HOME = originalCodexHome
         }
 
         await rm(sandboxDir, { recursive: true, force: true })
@@ -97,5 +108,26 @@ describe('listSlashCommands', () => {
         const nonExistentProjectDir = join(sandboxDir, 'not-exists')
 
         await expect(listSlashCommands('claude', nonExistentProjectDir)).resolves.toBeDefined()
+    })
+
+    it('lists supported codex built-ins', async () => {
+        const commands = await listSlashCommands('codex', projectDir)
+
+        expect(commands.filter(cmd => cmd.source === 'builtin').map(cmd => cmd.name)).toEqual(['clear', 'compact'])
+    })
+
+    it('lets project codex prompts override same-name built-ins', async () => {
+        await writeFile(
+            join(projectDir, '.codex', 'prompts', 'clear.md'),
+            ['---', 'description: Project clear', '---', '', 'Project clear prompt'].join('\n')
+        )
+
+        const commands = await listSlashCommands('codex', projectDir)
+        const clearCommands = commands.filter(cmd => cmd.name === 'clear')
+
+        expect(clearCommands).toHaveLength(1)
+        expect(clearCommands[0]?.source).toBe('project')
+        expect(clearCommands[0]?.description).toBe('Project clear')
+        expect(clearCommands[0]?.content).toBe('Project clear prompt')
     })
 })
