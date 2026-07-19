@@ -97,7 +97,7 @@
             html { background: #fff }
             html[data-theme="dark"] { background: #1c1c1e; color-scheme: dark }
             html[data-theme="oled"] { background: #000; color-scheme: dark }
-            html[data-color-theme]:not([data-color-theme="default"]) { background: inherit }
+            html[data-color-theme]:not([data-color-theme="default"]) { background: var(--app-bg, inherit) }
         </style>
 
         <title>HAPI</title>
