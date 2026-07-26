@@ -26,3 +26,13 @@ export function inlineMediaSourceFromWire(value: unknown): InlineMediaSource | u
             : undefined
     return { ingress, flavor, toolCallId, toolName }
 }
+
+/** Structural equality — wire normalization always allocates a fresh object. */
+export function areInlineMediaSourcesEqual(left?: InlineMediaSource, right?: InlineMediaSource): boolean {
+    if (left === right) return true
+    if (!left || !right) return false
+    return left.ingress === right.ingress
+        && left.flavor === right.flavor
+        && left.toolCallId === right.toolCallId
+        && left.toolName === right.toolName
+}
