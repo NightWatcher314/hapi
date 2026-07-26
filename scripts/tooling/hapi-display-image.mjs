@@ -70,7 +70,19 @@ function detectMediaTool(path) {
         return brand === 'avif' || brand === 'avis' ? 'display_image' : 'display_video'
     }
     if (head.length >= 4 && head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) {
-        return 'display_video'
+        // EBML is shared by WebM and Matroska — only route DocType "webm" to video.
+        const limit = Math.min(head.length, 128)
+        for (let i = 4; i + 3 < limit; i += 1) {
+            if (head[i] !== 0x42 || head[i + 1] !== 0x82) continue
+            const sizeByte = head[i + 2]
+            if ((sizeByte & 0x80) === 0) continue
+            const len = sizeByte & 0x7f
+            if (len === 0 || i + 3 + len > limit) continue
+            const docType = head.subarray(i + 3, i + 3 + len).toString('ascii')
+            if (docType === 'webm') return 'display_video'
+            break
+        }
+        return 'display_image'
     }
     return 'display_image'
 }

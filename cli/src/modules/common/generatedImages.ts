@@ -103,6 +103,27 @@ const MP4_FTYP_BRANDS = new Set([
     'ndxs',
 ])
 
+/** EBML DocType (element 0x4282) from the first header bytes; null if absent/unreadable. */
+function readEbmlDocType(bytes: Uint8Array): string | null {
+    const limit = Math.min(bytes.length, 128)
+    for (let i = 4; i + 3 < limit; i += 1) {
+        if (bytes[i] !== 0x42 || bytes[i + 1] !== 0x82) {
+            continue
+        }
+        const sizeByte = bytes[i + 2]
+        // Single-byte VINT: high bit set, length in low 7 bits.
+        if ((sizeByte & 0x80) === 0) {
+            continue
+        }
+        const len = sizeByte & 0x7f
+        if (len === 0 || i + 3 + len > limit) {
+            continue
+        }
+        return ascii(bytes, i + 3, i + 3 + len)
+    }
+    return null
+}
+
 export function detectVideoMimeType(bytes: Uint8Array): string | null {
     if (bytes.length >= 12 && ascii(bytes, 4, 8) === 'ftyp') {
         const brand = ascii(bytes, 8, 12)
@@ -117,7 +138,11 @@ export function detectVideoMimeType(bytes: Uint8Array): string | null {
         && bytes[1] === 0x45
         && bytes[2] === 0xdf
         && bytes[3] === 0xa3) {
-        return 'video/webm'
+        // EBML is shared by WebM and Matroska/MKV — only accept DocType webm.
+        if (readEbmlDocType(bytes) === 'webm') {
+            return 'video/webm'
+        }
+        return null
     }
 
     return null
