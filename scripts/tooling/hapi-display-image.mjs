@@ -64,7 +64,8 @@ function readHeader(path, length = 16) {
 }
 
 function detectMediaTool(path) {
-    const head = readHeader(path)
+    // EBML DocType can sit well past the first 16 bytes; match generatedImages scan window.
+    const head = readHeader(path, 128)
     if (head.length >= 12 && head.subarray(4, 8).toString('ascii') === 'ftyp') {
         const brand = head.subarray(8, 12).toString('ascii')
         return brand === 'avif' || brand === 'avis' ? 'display_image' : 'display_video'
