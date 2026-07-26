@@ -25,6 +25,22 @@ export type CursorMcpOverlayHandle = {
     cleanup: () => void;
 };
 
+type EnableCursorMcpResult = {
+    status: number | null;
+    stdout?: string | null;
+    stderr?: string | null;
+};
+
+export type EnableCursorMcp = (cwd: string, id: string) => EnableCursorMcpResult;
+
+function defaultEnableCursorMcp(cwd: string, id: string): EnableCursorMcpResult {
+    return spawnSync('agent', ['mcp', 'enable', id], {
+        cwd,
+        encoding: 'utf-8',
+        timeout: 30_000,
+    });
+}
+
 function parseMcpJson(raw: string): CursorMcpJson {
     const parsed = JSON.parse(raw) as unknown;
     if (parsed === null || typeof parsed !== 'object') {
@@ -58,7 +74,8 @@ function sameMcpEntry(a: McpServerEntry | undefined, b: McpServerEntry | undefin
  */
 export function installCursorMcpOverlay(
     cwd: string,
-    bridge: { command: string; args: string[] }
+    bridge: { command: string; args: string[] },
+    options: { enableCursorMcp?: EnableCursorMcp } = {},
 ): CursorMcpOverlayHandle {
     const cursorDir = join(cwd, '.cursor');
     const mcpJsonPath = join(cursorDir, 'mcp.json');
@@ -85,11 +102,7 @@ export function installCursorMcpOverlay(
 
     writeMcpJson(mcpJsonPath, config);
 
-    const enable = spawnSync('agent', ['mcp', 'enable', CURSOR_HAPI_MCP_SERVER_ID], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 30_000,
-    });
+    const enable = (options.enableCursorMcp ?? defaultEnableCursorMcp)(cwd, CURSOR_HAPI_MCP_SERVER_ID);
 
     if (enable.status !== 0) {
         const detail = (enable.stderr || enable.stdout || '').trim();

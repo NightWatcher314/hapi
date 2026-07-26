@@ -7,6 +7,8 @@ import { CURSOR_HAPI_MCP_SERVER_ID, installCursorMcpOverlay } from './cursorMcpO
 
 describe('installCursorMcpOverlay', () => {
     const roots: string[] = [];
+    /** Unit tests must not shell out to a real Cursor `agent` binary. */
+    const noopEnable = () => ({ status: 0 });
 
     afterEach(() => {
         for (const root of roots.splice(0)) {
@@ -37,7 +39,7 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        });
+        }, { enableCursorMcp: noopEnable });
 
         const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
             mcpServers: Record<string, { command: string; args: string[] }>;
@@ -67,7 +69,7 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        });
+        }, { enableCursorMcp: noopEnable });
 
         writeFileSync(mcpPath, JSON.stringify({
             mcpServers: {
@@ -102,7 +104,7 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        });
+        }, { enableCursorMcp: noopEnable });
 
         handle.cleanup();
 
@@ -123,7 +125,7 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        });
+        }, { enableCursorMcp: noopEnable });
 
         const userOwnedHapi = { command: 'user-hapi', args: ['mcp', '--custom'] };
         writeFileSync(mcpPath, JSON.stringify({
@@ -149,7 +151,7 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: 'hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:9999/'],
-        });
+        }, { enableCursorMcp: noopEnable });
 
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
         expect(existsSync(mcpPath)).toBe(true);
@@ -163,7 +165,7 @@ describe('installCursorMcpOverlay', () => {
         expect(() => installCursorMcpOverlay(cwd, {
             command: 'hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:9999/'],
-        })).toThrow();
+        }, { enableCursorMcp: noopEnable })).toThrow();
         // Malformed project config must stay untouched for the launcher try/catch path.
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
     });
