@@ -75,7 +75,8 @@ export function formatInlineMediaCommand(
     samplePath = '/absolute/path/to/image.png'
 ): string {
     const scriptDir = resolve(scriptPath, '..', '..', '..')
-    return `cd ${scriptDir} && bun scripts/tooling/hapi-display-image.mjs ${sessionPrefix} ${samplePath} "title"`
+    const q = (value: string) => JSON.stringify(value)
+    return `cd ${q(scriptDir)} && bun scripts/tooling/hapi-display-image.mjs ${q(sessionPrefix)} ${q(samplePath)} "title"`
 }
 
 export async function collectInlineMediaSessionBridges(jwt: string): Promise<InlineMediaSessionBridge[]> {
