@@ -15,7 +15,8 @@ describe('doctorInlineMedia', () => {
             'abc12345',
             '/tmp/my pics/shot.png',
         )
-        expect(cmd).toContain('cd "/tmp/my repo"')
+        // scriptPath is cli/src/ui/... → repo root is three levels up (cli)
+        expect(cmd).toContain('cd "/tmp/my repo/cli"')
         expect(cmd).toContain('"abc12345"')
         expect(cmd).toContain('"/tmp/my pics/shot.png"')
     })
