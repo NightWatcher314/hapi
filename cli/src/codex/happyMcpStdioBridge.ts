@@ -1,7 +1,7 @@
 /**
  * HAPI MCP STDIO Bridge
  *
- * Minimal STDIO MCP server exposing HAPI tools such as `change_title` and `display_image`.
+ * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, and `ping_peer`.
  * On invocation it forwards the tool call to an existing HAPI HTTP MCP server
  * using the StreamableHTTPClientTransport.
  *
@@ -18,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { z } from 'zod';
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from '@/modules/common/displayImagePrompt';
 
-const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video'];
+const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'ping_peer'];
 
 function parseArgs(argv: string[]): { url: string | null; toolNames: Set<string> } {
   let url: string | null = null;
@@ -156,6 +156,38 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
             return {
               content: [
                 { type: 'text' as const, text: `Failed to display video: ${error instanceof Error ? error.message : String(error)}` },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const pingPeerInputSchema: z.ZodTypeAny = z.object({
+      sessionIdPrefix: z.string().trim().min(1).describe(
+        'Target HAPI session id or unique id prefix (another session - not this chat)'
+      ),
+      message: z.string().min(1).describe('Message text to deliver to the target session'),
+    });
+
+    if (toolNames.has('ping_peer')) {
+      server.registerTool<any, any>(
+        'ping_peer',
+        {
+          description: 'Send a message to another HAPI session (peer handoff / nudge). Resolves by session id prefix, resumes if inactive, then POSTs the message on the same hub/namespace. Prefer this (or `hapi ping-peer`) over reinventing JWT+curl. Targets another session - not the current chat.',
+          title: 'Ping Peer Session',
+          inputSchema: pingPeerInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            const response = await client.callTool({ name: 'ping_peer', arguments: args });
+            return response as any;
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: `Failed to ping peer: ${error instanceof Error ? error.message : String(error)}` },
               ],
               isError: true,
             };

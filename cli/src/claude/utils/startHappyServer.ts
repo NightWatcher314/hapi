@@ -16,6 +16,7 @@ import { detectImageMimeType, detectVideoMimeType, registerGeneratedImage } from
 import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from "@/modules/common/displayImagePrompt";
 import { resolveSkill } from "@/modules/common/skills";
+import { PingPeerError, pingPeer } from "@/modules/pingPeer/pingPeer";
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
@@ -25,6 +26,19 @@ type StartHappyServerOptions = {
         flavor: string;
     };
 };
+
+/** Registered on the MCP server, but never pre-approved via Claude --allowedTools. */
+const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set(['ping_peer']);
+
+/**
+ * Map HAPI MCP tool names to Claude `--allowedTools` entries.
+ * Keeps `ping_peer` off the auto-allow list so resume+inject still prompts.
+ */
+export function toClaudeAllowedHapiMcpTools(toolNames: string[]): string[] {
+    return toolNames
+        .filter((toolName) => !CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS.has(toolName))
+        .map((toolName) => `mcp__hapi__${toolName}`);
+}
 
 function createHapiMcpServer(
     client: ApiSessionClient,
@@ -70,6 +84,13 @@ function createHapiMcpServer(
     const displayVideoInputSchema: z.ZodTypeAny = z.object({
         path: z.string().describe('Local filesystem path of the video to display inline (mp4 or webm)'),
         title: z.string().optional().describe('Optional display title or filename for the video'),
+    });
+
+    const pingPeerInputSchema: z.ZodTypeAny = z.object({
+        sessionIdPrefix: z.string().trim().min(1).describe(
+            'Target HAPI session id or unique id prefix (another session - not this chat)'
+        ),
+        message: z.string().min(1).describe('Message text to deliver to the target session'),
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
@@ -221,6 +242,45 @@ function createHapiMcpServer(
         }
     });
 
+    mcp.registerTool<any, any>('ping_peer', {
+        description: 'Send a message to another HAPI session (peer handoff / nudge). Resolves by session id prefix, resumes if inactive, then POSTs the message on the same hub/namespace. Prefer this (or `hapi ping-peer`) over reinventing JWT+curl. Targets another session - not the current chat.',
+        title: 'Ping Peer Session',
+        inputSchema: pingPeerInputSchema,
+    }, async (args: { sessionIdPrefix: string; message: string }) => {
+        logger.debug('[hapiMCP] ping_peer:', args.sessionIdPrefix);
+        try {
+            const result = await pingPeer({
+                sessionIdPrefix: args.sessionIdPrefix,
+                message: args.message,
+            });
+            return {
+                content: [
+                    {
+                        type: 'text' as const,
+                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
+                    },
+                ],
+                isError: false,
+            };
+        } catch (error) {
+            const message = error instanceof PingPeerError
+                ? error.message
+                : error instanceof Error
+                    ? error.message
+                    : String(error);
+            logger.debug('[hapiMCP] ping_peer failed:', message);
+            return {
+                content: [
+                    {
+                        type: 'text' as const,
+                        text: `Failed to ping peer: ${message}`,
+                    },
+                ],
+                isError: true,
+            };
+        }
+    });
+
     if (skillLookup) {
         mcp.registerTool<any, any>('skill_lookup', {
             description: 'Load a HAPI skill by exact name. When a user message starts with $name, call this tool with that name before acting.',
@@ -341,8 +401,8 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
     }));
 
     const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video']
-        : ['display_image', 'display_video'];
+        ? ['change_title', 'display_image', 'display_video', 'ping_peer']
+        : ['display_image', 'display_video', 'ping_peer'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }

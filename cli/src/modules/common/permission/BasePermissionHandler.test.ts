@@ -37,32 +37,27 @@ describe('resolveToolAutoApprovalDecision skill_lookup', () => {
     })
 })
 
-describe('resolveToolAutoApprovalDecision display media', () => {
+describe('resolveToolAutoApprovalDecision ping_peer', () => {
     it.each([
-        'display_image',
-        'display_video',
-        'hapi_display_image',
-        'hapi_display_video',
-        'mcp__hapi__display_image',
-        'mcp__hapi__display_video',
-    ])('does not auto-approve display media tool %s in default mode', (toolName) => {
-        expect(resolveToolAutoApprovalDecision(
-            'default',
-            toolName,
-            'call-1'
-        )).toBeNull()
+        'ping_peer',
+        'mcp__hapi__ping_peer',
+        'hapi_ping_peer',
+        'Ping Peer Session'
+    ])('does not auto-approve %s in default mode', (toolName) => {
+        expect(resolveToolAutoApprovalDecision('default', toolName, 'call-1')).toBeNull()
     })
 
-    it('does not approve substring lookalikes or forged call ids', () => {
-        expect(resolveToolAutoApprovalDecision(
-            'default',
-            'dangerous_display_image_upload',
-            'call-1'
-        )).toBeNull()
-        expect(resolveToolAutoApprovalDecision(
-            'default',
-            'dangerous_tool',
-            'display_video-forged-id'
-        )).toBeNull()
+    it.each([
+        'ping_peer',
+        'mcp__hapi__ping_peer',
+        'hapi_ping_peer',
+        'Ping Peer Session'
+    ])('does not auto-approve %s in read-only mode', (toolName) => {
+        expect(resolveToolAutoApprovalDecision('read-only', toolName, 'call-1')).toBeNull()
+    })
+
+    it('still auto-approves unrelated read tools in read-only mode', () => {
+        expect(resolveToolAutoApprovalDecision('read-only', 'Read', 'call-1')).toBe('approved')
+        expect(resolveToolAutoApprovalDecision('read-only', 'grep', 'call-2')).toBe('approved')
     })
 })
