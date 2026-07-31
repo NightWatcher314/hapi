@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
 import { AssistantRuntimeProvider, useAssistantApi, useAssistantState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
@@ -19,6 +20,7 @@ import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
+import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
 import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
@@ -33,9 +35,23 @@ import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
 import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useSessions } from '@/hooks/queries/useSessions'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { formatSessionMentionTooltip } from '@/lib/sessionReference'
+import { classifySessionAttention, getSessionAttentionLabelKey } from '@/lib/sessionAttention'
+import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
+import { formatRelativeTime } from '@/lib/relativeTime'
 import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
 import { useHappyRuntime } from '@/lib/assistant-runtime'
+import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
+import { createScratchlistAttachmentAdapter } from '@/lib/scratchlistAttachmentAdapter'
+import {
+    rehydrateScratchlistAttachmentsToComposer,
+    stageScratchlistAttachmentsForComposeSend
+} from '@/lib/scratchlistAttachmentFlow'
+import type { ScratchlistEntry } from '@/lib/scratchlist'
+import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
 import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
 import { getDraft } from '@/lib/composer-drafts'
@@ -182,15 +198,8 @@ export function isScratchlistHotkeyBlockedTarget(target: EventTarget | null): bo
 
 /**
  * Decide whether a submit should be routed to the per-session scratchlist
- * or to the regular chat send. Scratchlist entries are pure text - they
- * don't carry attachments or schedules - so any submit that includes
- * either of those MUST fall through to the normal chat path even if the
- * scratchlist toggle is on. Otherwise the wrapper would silently drop
- * attachments / scheduled-send metadata while telling the composer the
- * submission succeeded (which then clears the composer state, losing
- * the user's data).
- *
- * Per upstream review on PR #798 (github-actions[bot] [Major]).
+ * or to the regular chat send. Scratchlist entries support text and hub-
+ * stored attachments; scheduled sends still fall through to chat.
  *
  * Pure / exported so it can be unit tested without mounting SessionChat.
  */
@@ -200,9 +209,11 @@ export function shouldRouteToScratchlist(
     scheduledAt: number | null | undefined,
 ): boolean {
     if (!scratchlistMode) return false
-    if (attachments && attachments.length > 0) return false
     if (scheduledAt != null) return false
-    return true
+    // Only park when every attachment is already hub-resident. Composer
+    // uploads made before scratchlist mode was enabled still have normal
+    // CLI paths; the hub rejects those as scratchlist metadata.
+    return (attachments ?? []).every((att) => isHubScratchlistAttachmentPath(att.path))
 }
 
 function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
@@ -313,41 +324,51 @@ function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean })
  * composer-toolbar counter and the drawer share one source of truth.
  */
 export function ScratchlistDrawerHost(props: {
+    sessionId: string
+    api: ApiClient
     entries: ReturnType<typeof useHubScratchlist>['entries']
     onMove: ReturnType<typeof useHubScratchlist>['move']
     onDelete: ReturnType<typeof useHubScratchlist>['remove']
     onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
-    /**
-     * Called when the operator promotes an entry to the composer.
-     *
-     * Promoting means "I want to send this for real now" - so the host
-     * MUST exit scratchlist mode, otherwise the next composer submit
-     * routes back to scratchlist (per the v1.1 modal-mode contract) and
-     * the user re-adds the same text instead of sending it to chat.
-     * Per upstream review on PR #798 (HAPI Bot, v6 follow-up).
-     */
     onExitScratchlistMode: () => void
 }) {
     const assistantApi = useAssistantApi()
-    const handlePromoteToComposer = useCallback((text: string) => {
-        assistantApi.composer().setText(text)
-        props.onExitScratchlistMode()
-    }, [assistantApi, props.onExitScratchlistMode])
-    const handlePromoteToQueue = useCallback(async (text: string) => {
-        // Promote-to-queue bypasses the scratchlist-mode wrapper by
-        // calling props.onSend directly (the chat send), so the queue
-        // entry lands in the conversation regardless of scratchlist
-        // mode. After a successful send, exit scratchlist mode so the
-        // operator can continue normal chat (issue #959).
-        const accepted = await props.onSend(text)
+    const handlePromoteToComposer = useCallback(async (entry: ScratchlistEntry) => {
+        assistantApi.composer().setText(entry.text)
+        // Exit scratchlist mode before rehydrating attachments so addAttachment
+        // uses the normal chat upload adapter (not the scratchlist hub adapter).
+        flushSync(() => {
+            props.onExitScratchlistMode()
+        })
+        if (entry.attachments && entry.attachments.length > 0) {
+            await rehydrateScratchlistAttachmentsToComposer(
+                props.api,
+                props.sessionId,
+                entry.attachments,
+                assistantApi.composer()
+            )
+        }
+    }, [assistantApi, props.api, props.onExitScratchlistMode, props.sessionId])
+    const handlePromoteToQueue = useCallback(async (entry: ScratchlistEntry) => {
+        let attachments: AttachmentMetadata[] | undefined
+        if (entry.attachments && entry.attachments.length > 0) {
+            attachments = await stageScratchlistAttachmentsForComposeSend(
+                props.api,
+                props.sessionId,
+                entry.attachments
+            )
+        }
+        const accepted = await props.onSend(entry.text, attachments)
         if (accepted) {
             props.onExitScratchlistMode()
         }
         return accepted
-    }, [props.onSend, props.onExitScratchlistMode])
+    }, [props.api, props.onSend, props.onExitScratchlistMode, props.sessionId])
     return (
         <ScratchlistDrawer
             entries={props.entries}
+            sessionId={props.sessionId}
+            api={props.api}
             onMove={props.onMove}
             onDelete={props.onDelete}
             onPromoteToComposer={handlePromoteToComposer}
@@ -390,12 +411,13 @@ type SessionChatProps = {
     isSyncingTail: boolean
     isLoadingMoreMessages: boolean
     isSending: boolean
-    unseenCount: number
+    viewMode: 'tail' | 'history'
     messagesVersion: number
     historyVersion: number
     onBack: () => void
     onRefresh: () => void
-    onLoadMore: () => Promise<boolean>
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onCancelLoadMore: () => void
     // Resolves true when the send was accepted by the underlying mutation, false when
     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async
     // inactive-session resume failed. Composer state that should only be cleared on
@@ -462,6 +484,41 @@ function SessionChatInner(props: SessionChatProps) {
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
     const scratchlist = useHubScratchlist(props.session.id, props.api)
+    const { sessions: allSessions } = useSessions(props.api)
+    const resolveSessionMentionTooltip = useCallback((id: string, title: string) => {
+        const hit = allSessions.find((s) => s.id === id) ?? null
+        if (!hit) {
+            return {
+                model: formatSessionMentionTooltip(null, title, id),
+                session: null,
+            }
+        }
+        const attention = classifySessionAttention(hit, {
+            selected: false,
+            lastSeenAt: getSessionLastSeenAt(hit.id),
+        })
+        const attentionLabel = attention
+            ? t(getSessionAttentionLabelKey(attention))
+            : null
+        return {
+            model: formatSessionMentionTooltip(
+                {
+                    id: hit.id,
+                    title: getSessionTitle(hit),
+                    active: hit.active,
+                    lifecycleState: hit.metadata?.lifecycleState ?? null,
+                    path: hit.metadata?.path ?? null,
+                    worktreePath: hit.metadata?.worktree?.worktreePath ?? null,
+                    relativeTime: formatRelativeTime(hit.updatedAt, t),
+                    thinking: hit.thinking,
+                    attentionLabel,
+                },
+                title,
+                id
+            ),
+            session: hit,
+        }
+    }, [allSessions, t])
     const [scratchlistMode, setScratchlistMode] = useState(false)
     // Mode resets across sessions implicitly: SessionChat is keyed by
     // session.id at the public-export boundary, so a session switch
@@ -505,14 +562,7 @@ function SessionChatInner(props: SessionChatProps) {
     }, [])
     /**
      * onSend wrapper: when scratchlist mode is on AND the submission is
-     * pure text (no attachments, no scheduledAt), the operator's submit
-     * is treated as "add to scratchlist" instead of "send to chat".
-     *
-     * If the submission carries attachments or a scheduledAt value,
-     * scratchlist can't represent it (entries are text-only), so we
-     * fall through to the normal chat send. Silently dropping
-     * attachments / schedule while reporting success to the composer
-     * caused PR #798 review's [Major] data-loss finding.
+     * not scheduled, route to scratchlist (text and/or hub attachments).
      *
      * The composer (HappyComposer) uses the boolean return value to
      * decide whether to clear text/attachments/schedule, so we resolve
@@ -528,11 +578,33 @@ function SessionChatInner(props: SessionChatProps) {
             scheduledAt?: number | null,
         ): Promise<boolean> => {
             if (shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)) {
-                return scratchlist.add(text)
+                return scratchlist.add(text, attachments)
+            }
+            // If the user uploaded while scratchlist mode was on, then toggled
+            // it off before send, pending items still carry hub paths. Stage
+            // those through the normal CLI upload dir before chat send.
+            const list = attachments ?? []
+            const hubItems = list.filter((att) => isHubScratchlistAttachmentPath(att.path))
+            if (hubItems.length > 0) {
+                const normalItems = list.filter((att) => !isHubScratchlistAttachmentPath(att.path))
+                const staged = await stageScratchlistAttachmentsForComposeSend(
+                    props.api,
+                    props.session.id,
+                    hubItems,
+                )
+                const accepted = await props.onSend(text, [...normalItems, ...staged], scheduledAt)
+                if (accepted) {
+                    // Hub blobs were copied into the normal upload dir; drop the
+                    // scratchlist copies so they stop counting against the session cap.
+                    await Promise.allSettled(
+                        hubItems.map((att) => props.api.deleteScratchlistAttachment(props.session.id, att.id))
+                    )
+                }
+                return accepted
             }
             return props.onSend(text, attachments, scheduledAt)
         },
-        [props.onSend, scratchlist, scratchlistMode],
+        [props.onSend, props.api, props.session.id, scratchlist, scratchlistMode],
     )
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
@@ -958,6 +1030,11 @@ function SessionChatInner(props: SessionChatProps) {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)
     }, [visibleBlocks])
 
+    // "N new messages" counts rendered blocks, not raw messages: a subagent run
+    // is dozens of sidechain messages but a single Task card, and a tool_use +
+    // tool_result pair is one card.
+    const unseenCount = useUnseenBlockCount(props.viewMode, visibleBlocks)
+
     const outlineItems = useMemo(
         () => buildConversationOutline(reconciled.blocks),
         [reconciled.blocks]
@@ -1186,8 +1263,10 @@ function SessionChatInner(props: SessionChatProps) {
         if (!props.session.active) {
             return undefined
         }
-        return createAttachmentAdapter(props.api, props.session.id)
-    }, [props.api, props.session.id, props.session.active])
+        return scratchlistMode
+            ? createScratchlistAttachmentAdapter(props.api, props.session.id)
+            : createAttachmentAdapter(props.api, props.session.id)
+    }, [props.api, props.session.id, props.session.active, scratchlistMode])
 
     const runtime = useHappyRuntime({
         session: props.session,
@@ -1265,7 +1344,8 @@ function SessionChatInner(props: SessionChatProps) {
                         hasMoreMessages={props.hasMoreMessages}
                         isLoadingMoreMessages={props.isLoadingMoreMessages}
                         onLoadMore={props.onLoadMore}
-                        unseenCount={props.unseenCount}
+                        onCancelLoadMore={props.onCancelLoadMore}
+                        unseenCount={unseenCount}
                         rawMessagesCount={visibleMessages.length}
                         normalizedMessagesCount={normalizedMessages.length}
                         messagesVersion={props.messagesVersion}
@@ -1308,6 +1388,8 @@ function SessionChatInner(props: SessionChatProps) {
                              */}
                             {scratchlistMode ? (
                                 <ScratchlistDrawerHost
+                                    sessionId={props.session.id}
+                                    api={props.api}
                                     entries={scratchlist.entries}
                                     onMove={scratchlist.move}
                                     onDelete={scratchlist.remove}
@@ -1328,6 +1410,7 @@ function SessionChatInner(props: SessionChatProps) {
                         <HappyComposer
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
+                        resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                         disabled={props.isSending}
                         pendingSchedule={pendingSchedule}
                         onSchedule={setPendingSchedule}

@@ -19,7 +19,7 @@ export const TITLE_INSTRUCTION = trimIdent(`
     If that exact tool name is unavailable, call an equivalent alias such as hapi__change_title, mcp__hapi__change_title, or hapi_change_title.
     Do not rename the chat for routine progress, substeps, implementation details, or a slightly better wording.
     Rename only when the user's primary objective changes substantially and the existing title would be misleading.
-    To message another HAPI session (peer handoff / nudge), call functions.hapi__ping_peer with sessionIdPrefix and message - do not reinvent JWT+curl. Shell fallback: hapi ping-peer <prefix> <message>.
+    When the user cites another HAPI session as [title](/sessions/<id>) (or a bare /sessions/<id>), extract that <id>. Call functions.hapi__inspect_peer with sessionIdPrefix=<id> to read metadata and recent messages; call functions.hapi__ping_peer with sessionIdPrefix=<id> and a message to nudge or hand off. Prefer these over JWT+curl. Shell fallbacks: hapi inspect-peer <id> / hapi ping-peer <id> <message>.
     ${DISPLAY_IMAGE_PROMPT_CODEX}
     ${DISPLAY_VIDEO_PROMPT_CODEX}
 `);

@@ -18,7 +18,7 @@ import { SKILL_LOOKUP_INSTRUCTION } from '@/modules/common/skillLookupInstructio
  */
 export const TITLE_INSTRUCTION = trimIdent(`
     ${HAPI_MCP_BRIDGE_PROMPT}
-    To message another HAPI session (peer handoff / nudge), call "hapi_ping_peer" with sessionIdPrefix and message - do not reinvent JWT+curl. Shell fallback: hapi ping-peer <prefix> <message>.
+    When the user cites another HAPI session as [title](/sessions/<id>) (or a bare /sessions/<id>), extract that <id>. Call "hapi_inspect_peer" with sessionIdPrefix=<id> to read metadata and recent messages; call "hapi_ping_peer" with sessionIdPrefix=<id> and a message to nudge or hand off. Prefer these over JWT+curl. Shell fallbacks: hapi inspect-peer <id> / hapi ping-peer <id> <message>.
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
 
@@ -29,7 +29,7 @@ export const TITLE_INSTRUCTION = trimIdent(`
 export const OPENCODE_NATIVE_TOOL_INSTRUCTION = trimIdent(`
     ${DISPLAY_IMAGE_PROMPT_HAPI_MCP}
     ${DISPLAY_VIDEO_PROMPT_HAPI_MCP}
-    To message another HAPI session (peer handoff / nudge), call "hapi_ping_peer" with sessionIdPrefix and message - do not reinvent JWT+curl. Shell fallback: hapi ping-peer <prefix> <message>.
+    When the user cites another HAPI session as [title](/sessions/<id>) (or a bare /sessions/<id>), extract that <id>. Call "hapi_inspect_peer" with sessionIdPrefix=<id> to read metadata and recent messages; call "hapi_ping_peer" with sessionIdPrefix=<id> and a message to nudge or hand off. Prefer these over JWT+curl. Shell fallbacks: hapi inspect-peer <id> / hapi ping-peer <id> <message>.
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
 

@@ -42,6 +42,7 @@ import type {
     OpencodeReasoningEffortResponse,
     QueuedStateResponse,
     ReopenSessionResponse,
+    SqliteStorageUsageResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor } from '@hapi/protocol'
@@ -617,6 +618,18 @@ export class ApiClient {
         return await this.request<MachinesResponse>('/api/machines')
     }
 
+    /** Pass an empty string to clear the custom name and fall back to the hostname. */
+    async renameMachine(machineId: string, displayName: string): Promise<void> {
+        await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ displayName })
+        })
+    }
+
+    async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
+        return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+    }
+
     async listMachineDirectory(
         machineId: string,
         path: string
@@ -771,18 +784,81 @@ export class ApiClient {
      */
 
     async getScratchlist(sessionId: string): Promise<{
-        entries: Array<{ entryId: string; text: string; createdAt: number; updatedAt: number }>
+        entries: Array<{
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }>
     }> {
         return await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`
         )
     }
 
+    async uploadScratchlistAttachment(
+        sessionId: string,
+        filename: string,
+        content: string,
+        mimeType: string
+    ): Promise<{
+        success: boolean
+        attachment?: import('@hapi/protocol').ScratchlistAttachmentMetadata
+        error?: string
+        code?: string
+    }> {
+        return await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ filename, content, mimeType })
+            }
+        )
+    }
+
+    async fetchScratchlistAttachmentBlob(sessionId: string, attachmentId: string): Promise<Blob> {
+        const headers = new Headers()
+        const liveToken = this.getToken ? this.getToken() : null
+        const authToken = liveToken ?? this.token
+        if (authToken) {
+            headers.set('authorization', `Bearer ${authToken}`)
+        }
+        const response = await fetch(
+            this.buildUrl(
+                `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
+            ),
+            { headers }
+        )
+        if (!response.ok) {
+            throw new ApiError(`Failed to fetch scratchlist attachment (${response.status})`, response.status)
+        }
+        return await response.blob()
+    }
+
+    async deleteScratchlistAttachment(sessionId: string, attachmentId: string): Promise<void> {
+        await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`,
+            { method: 'DELETE' }
+        )
+    }
+
     async createScratchlistEntry(
         sessionId: string,
-        body: { text: string; entryId?: string; createdAt?: number }
+        body: {
+            text: string
+            entryId?: string
+            createdAt?: number
+            attachments?: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
     ): Promise<{
-        entry: { entryId: string; text: string; createdAt: number; updatedAt: number }
+        entry: {
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
     }> {
         return await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`,
@@ -798,7 +874,13 @@ export class ApiClient {
         entryId: string,
         text: string
     ): Promise<{
-        entry: { entryId: string; text: string; createdAt: number; updatedAt: number }
+        entry: {
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
     }> {
         return await this.request(
             `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,

@@ -29,7 +29,7 @@ export { ScratchlistStore } from './scratchlistStore'
 export { SessionStore } from './sessionStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 14
+const SCHEMA_VERSION: number = 15
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -107,6 +107,36 @@ export class Store {
         this.scratchlist = new ScratchlistStore(this.db)
     }
 
+    /**
+     * Atomically records a CLI prompt-consumption acknowledgement and returns
+     * the persisted session activity timestamp. A duplicate or sibling-stamped
+     * acknowledgement leaves the session untouched while returning its existing
+     * timestamp for replay-safe in-memory cache synchronization.
+     */
+    recordMessagesConsumed(
+        sessionId: string,
+        localIds: string[],
+        invokedAt: number,
+        namespace: string
+    ): number {
+        return this.db.transaction(() => {
+            const changes = this.messages.markMessagesInvoked(sessionId, localIds, invokedAt)
+            if (changes > 0) {
+                this.sessions.touchSessionUpdatedAt(sessionId, invokedAt, namespace)
+            }
+
+            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
+            if (!session) {
+                throw new Error('session not found after messages-consumed transition')
+            }
+            if (changes > 0 && session.updatedAt < invokedAt) {
+                throw new Error('session activity was not persisted after messages-consumed transition')
+            }
+
+            return session.updatedAt
+        })()
+    }
+
     close(): void {
         if (this.closed) return
         this.db.close()
@@ -141,6 +171,7 @@ export class Store {
             11: () => this.migrateFromV11ToV12(),
             12: () => this.migrateFromV12ToV13(),
             13: () => this.migrateFromV13ToV14(),
+            14: () => this.migrateFromV14ToV15(),
         })
 
         if (currentVersion === 0) {
@@ -295,6 +326,7 @@ export class Store {
                 text TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                attachments TEXT DEFAULT NULL,
                 PRIMARY KEY (session_id, entry_id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
@@ -545,6 +577,22 @@ export class Store {
         // Repair v13 databases produced before the divergent v12 migrations
         // were reconciled. Both underlying migrations are idempotent.
         this.migrateFromV12ToV13()
+    }
+
+    /**
+     * tiann/hapi#921 (scratchlist v2.2): attachment metadata JSON column.
+     * Bytes live on hub filesystem under HAPI_HOME/scratchlist-attachments/.
+     * Upstream ladder: V11→V12 = session_scratchlist (#896); V12–V14 =
+     * message_epochs reconciliation; this step is V14→V15 for attachments.
+     *
+     * Rollback: `ALTER TABLE session_scratchlist DROP COLUMN attachments` is
+     * unsupported on older SQLite; rebuild DB or leave column unused.
+     */
+    private migrateFromV14ToV15(): void {
+        const columns = this.db.prepare('PRAGMA table_info(session_scratchlist)').all() as Array<{ name: string }>
+        if (!columns.some((col) => col.name === 'attachments')) {
+            this.db.exec(`ALTER TABLE session_scratchlist ADD COLUMN attachments TEXT DEFAULT NULL`)
+        }
     }
 
     private getSessionColumnNames(): Set<string> {
