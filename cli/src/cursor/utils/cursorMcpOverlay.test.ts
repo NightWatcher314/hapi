@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
     existsSync,
+    linkSync,
     mkdirSync,
-    openSync,
     readFileSync,
     readdirSync,
     rmSync,
@@ -17,6 +17,7 @@ import {
     CURSOR_HAPI_MCP_SERVER_ID,
     cursorHapiMcpServerId,
     installCursorMcpOverlay,
+    isProcessAlive,
     readLockOwner,
     withMcpJsonLock,
     writeMcpJsonAtomic,
@@ -289,7 +290,15 @@ describe('installCursorMcpOverlay', () => {
         const order: string[] = [];
         withMcpJsonLock(lockPath, () => {
             order.push('outer-enter');
-            expect(() => openSync(lockPath, 'wx')).toThrow();
+            expect(readLockOwner(lockPath)?.pid).toBe(process.pid);
+            // Second exclusive link onto the same path must fail while held.
+            const other = `${lockPath}.other.tmp`;
+            writeFileSync(other, JSON.stringify({ pid: process.pid, token: 'other' }), {
+                encoding: 'utf-8',
+                mode: 0o600,
+            });
+            expect(() => linkSync(other, lockPath)).toThrow();
+            unlinkSync(other);
             order.push('outer-exit');
         });
         expect(order).toEqual(['outer-enter', 'outer-exit']);
@@ -315,5 +324,10 @@ describe('installCursorMcpOverlay', () => {
         expect(readLockOwner(lockPath)?.token).toBe('successor-token');
         expect(releasedOwnerToken).toBeTruthy();
         unlinkSync(lockPath);
+    });
+
+    it('isProcessAlive treats EPERM as alive and ESRCH as dead', () => {
+        expect(isProcessAlive(process.pid)).toBe(true);
+        expect(isProcessAlive(2_147_483_646)).toBe(false);
     });
 });

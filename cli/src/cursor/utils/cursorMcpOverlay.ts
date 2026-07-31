@@ -5,17 +5,15 @@
  */
 
 import {
-    closeSync,
     existsSync,
+    linkSync,
     mkdirSync,
-    openSync,
     readFileSync,
     renameSync,
     rmSync,
     statSync,
     unlinkSync,
     writeFileSync,
-    writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -67,6 +65,7 @@ export type EnableCursorMcp = (cwd: string, id: string) => EnableCursorMcpResult
 
 const LOCK_RETRY_INTERVAL_MS = 50;
 const MAX_LOCK_ATTEMPTS = 100;
+const ORPHAN_LOCK_STALE_MS = 10_000;
 
 function defaultEnableCursorMcp(cwd: string, id: string): EnableCursorMcpResult {
     return spawnSync('agent', ['mcp', 'enable', id], {
@@ -127,69 +126,102 @@ export function readLockOwner(lockPath: string): LockOwner | null {
     return null;
 }
 
-function isProcessAlive(pid: number): boolean {
+/** Fail closed: only ESRCH means the PID is confirmed gone. EPERM ⇒ alive. */
+export function isProcessAlive(pid: number): boolean {
     if (pid <= 0) {
         return false;
     }
     try {
         process.kill(pid, 0);
         return true;
+    } catch (error) {
+        const code = error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: string }).code
+            : undefined;
+        return code !== 'ESRCH';
+    }
+}
+
+function tryStealOrphanLock(lockPath: string): void {
+    const existing = readLockOwner(lockPath);
+    if (existing) {
+        if (isProcessAlive(existing.pid)) {
+            return;
+        }
+    } else {
+        // Corrupt/empty: only steal after it has aged (avoids racing a writer mid-publish).
+        try {
+            const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+            if (ageMs < ORPHAN_LOCK_STALE_MS) {
+                return;
+            }
+        } catch {
+            return;
+        }
+    }
+    try {
+        unlinkSync(lockPath);
     } catch {
-        return false;
+        // raced with another stealer / owner release
     }
 }
 
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.
- * Lock files record `{ pid, token }`; only a dead owner may be stolen, and only the
- * matching token may unlink on release (avoids deleting a successor's live lock).
+ * Owner JSON is published atomically via link(2) from a fully-written staging file.
+ * Only a dead owner (or aged corrupt lock) may be stolen; release unlinks only our token.
  */
 export function withMcpJsonLock(lockPath: string, fn: () => void): void {
     let attempts = 0;
-    let fd: number | undefined;
     let owner: LockOwner | undefined;
 
     while (attempts < MAX_LOCK_ATTEMPTS) {
+        owner = { pid: process.pid, token: randomUUID() };
+        const candidate = `${lockPath}.${owner.token}.tmp`;
         try {
-            fd = openSync(lockPath, 'wx');
-            owner = { pid: process.pid, token: randomUUID() };
-            writeSync(fd, Buffer.from(JSON.stringify(owner), 'utf-8'));
-            break;
+            writeFileSync(candidate, JSON.stringify(owner), {
+                encoding: 'utf-8',
+                flag: 'wx',
+                mode: 0o600,
+            });
+            try {
+                linkSync(candidate, lockPath);
+                break;
+            } catch (err: unknown) {
+                const code = err && typeof err === 'object' && 'code' in err
+                    ? (err as { code?: string }).code
+                    : undefined;
+                if (code !== 'EEXIST') {
+                    throw err;
+                }
+                attempts++;
+                tryStealOrphanLock(lockPath);
+                sleepSync(LOCK_RETRY_INTERVAL_MS);
+            } finally {
+                rmSync(candidate, { force: true });
+            }
+            continue;
         } catch (err: unknown) {
+            rmSync(candidate, { force: true });
             const code = err && typeof err === 'object' && 'code' in err
                 ? (err as { code?: string }).code
                 : undefined;
-            if (code !== 'EEXIST') {
-                throw err;
-            }
-            attempts++;
-            const existing = readLockOwner(lockPath);
-            if (existing && isProcessAlive(existing.pid)) {
+            if (code === 'EEXIST') {
+                attempts++;
                 sleepSync(LOCK_RETRY_INTERVAL_MS);
                 continue;
             }
-            // Dead/corrupt owner — steal only this path once, then retry create.
-            try {
-                unlinkSync(lockPath);
-            } catch {
-                // raced with another stealer
-            }
-            sleepSync(LOCK_RETRY_INTERVAL_MS);
+            throw err;
         }
     }
 
-    if (fd === undefined || !owner) {
+    if (!owner || !existsSync(lockPath) || readLockOwner(lockPath)?.token !== owner.token) {
         throw new Error(`Timed out waiting for Cursor MCP overlay lock: ${lockPath}`);
     }
 
     try {
         fn();
     } finally {
-        try {
-            closeSync(fd);
-        } catch {
-            // ignore
-        }
         try {
             if (readLockOwner(lockPath)?.token === owner.token) {
                 unlinkSync(lockPath);
