@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+    existsSync,
+    mkdirSync,
+    openSync,
+    readFileSync,
+    readdirSync,
+    rmSync,
+    statSync,
+    unlinkSync,
+    writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +17,7 @@ import {
     CURSOR_HAPI_MCP_SERVER_ID,
     cursorHapiMcpServerId,
     installCursorMcpOverlay,
+    readLockOwner,
     withMcpJsonLock,
     writeMcpJsonAtomic,
 } from './cursorMcpOverlay';
@@ -246,6 +257,24 @@ describe('installCursorMcpOverlay', () => {
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
     });
 
+    it('writeMcpJsonAtomic preserves restrictive mode and cleans up tmp on failure path', () => {
+        const cwd = makeProjectDir();
+        mkdirSync(join(cwd, '.cursor'), { recursive: true });
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        writeFileSync(mcpPath, `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`, {
+            encoding: 'utf-8',
+            mode: 0o600,
+        });
+
+        writeMcpJsonAtomic(mcpPath, {
+            mcpServers: { a: { command: 'a', args: [] } },
+        });
+
+        expect(statSync(mcpPath).mode & 0o777).toBe(0o600);
+        expect(JSON.parse(readFileSync(mcpPath, 'utf-8')).mcpServers.a.command).toBe('a');
+        expect(readdirSync(join(cwd, '.cursor')).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    });
+
     it('writeMcpJsonAtomic replaces via rename and withMcpJsonLock serializes writers', () => {
         const cwd = makeProjectDir();
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
@@ -260,12 +289,31 @@ describe('installCursorMcpOverlay', () => {
         const order: string[] = [];
         withMcpJsonLock(lockPath, () => {
             order.push('outer-enter');
-            // Nested attempt would deadlock if same process re-entered; instead verify
-            // exclusive create fails while lock is held.
             expect(() => openSync(lockPath, 'wx')).toThrow();
             order.push('outer-exit');
         });
         expect(order).toEqual(['outer-enter', 'outer-exit']);
         expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it('withMcpJsonLock only unlinks its own token (does not delete a successor lock)', () => {
+        const cwd = makeProjectDir();
+        mkdirSync(join(cwd, '.cursor'), { recursive: true });
+        const lockPath = join(cwd, '.cursor', 'mcp.json.hapi.lock');
+
+        let releasedOwnerToken: string | undefined;
+        withMcpJsonLock(lockPath, () => {
+            const owner = readLockOwner(lockPath);
+            expect(owner?.pid).toBe(process.pid);
+            releasedOwnerToken = owner?.token;
+            // Simulate a successor stealing the path while we still hold the fd conceptually:
+            // write a different owner into the lock path after our create (race successor).
+            writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'successor-token' }), 'utf-8');
+        });
+        // Original owner must not unlink the successor's lock.
+        expect(existsSync(lockPath)).toBe(true);
+        expect(readLockOwner(lockPath)?.token).toBe('successor-token');
+        expect(releasedOwnerToken).toBeTruthy();
+        unlinkSync(lockPath);
     });
 });

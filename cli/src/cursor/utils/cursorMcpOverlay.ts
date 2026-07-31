@@ -15,6 +15,7 @@ import {
     statSync,
     unlinkSync,
     writeFileSync,
+    writeSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -47,6 +48,11 @@ type CursorMcpJson = {
     mcpServers?: Record<string, McpServerEntry>;
 };
 
+type LockOwner = {
+    pid: number;
+    token: string;
+};
+
 export type CursorMcpOverlayHandle = {
     cleanup: () => void;
 };
@@ -61,7 +67,6 @@ export type EnableCursorMcp = (cwd: string, id: string) => EnableCursorMcpResult
 
 const LOCK_RETRY_INTERVAL_MS = 50;
 const MAX_LOCK_ATTEMPTS = 100;
-const STALE_LOCK_TIMEOUT_MS = 10_000;
 
 function defaultEnableCursorMcp(cwd: string, id: string): EnableCursorMcpResult {
     return spawnSync('agent', ['mcp', 'enable', id], {
@@ -86,28 +91,69 @@ function readMcpJson(path: string): CursorMcpJson {
     return parseMcpJson(readFileSync(path, 'utf-8'));
 }
 
-/** Atomic replace so readers never see a partial mcp.json. */
+/** Atomic replace so readers never see a partial mcp.json; preserves existing mode. */
 export function writeMcpJsonAtomic(path: string, config: CursorMcpJson): void {
+    const mode = existsSync(path) ? (statSync(path).mode & 0o777) : 0o600;
     const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf-8');
-    renameSync(tmp, path);
+    try {
+        writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
+            encoding: 'utf-8',
+            mode,
+        });
+        renameSync(tmp, path);
+    } finally {
+        rmSync(tmp, { force: true });
+    }
 }
 
 function sleepSync(ms: number): void {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+export function readLockOwner(lockPath: string): LockOwner | null {
+    try {
+        const parsed = JSON.parse(readFileSync(lockPath, 'utf-8')) as unknown;
+        if (
+            parsed !== null
+            && typeof parsed === 'object'
+            && typeof (parsed as LockOwner).pid === 'number'
+            && typeof (parsed as LockOwner).token === 'string'
+        ) {
+            return parsed as LockOwner;
+        }
+    } catch {
+        // corrupt / empty lock
+    }
+    return null;
+}
+
+function isProcessAlive(pid: number): boolean {
+    if (pid <= 0) {
+        return false;
+    }
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.
- * Uses create-exclusive lockfile (same pattern as settings persistence).
+ * Lock files record `{ pid, token }`; only a dead owner may be stolen, and only the
+ * matching token may unlink on release (avoids deleting a successor's live lock).
  */
 export function withMcpJsonLock(lockPath: string, fn: () => void): void {
     let attempts = 0;
     let fd: number | undefined;
+    let owner: LockOwner | undefined;
 
     while (attempts < MAX_LOCK_ATTEMPTS) {
         try {
             fd = openSync(lockPath, 'wx');
+            owner = { pid: process.pid, token: randomUUID() };
+            writeSync(fd, Buffer.from(JSON.stringify(owner), 'utf-8'));
             break;
         } catch (err: unknown) {
             const code = err && typeof err === 'object' && 'code' in err
@@ -117,20 +163,22 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
                 throw err;
             }
             attempts++;
+            const existing = readLockOwner(lockPath);
+            if (existing && isProcessAlive(existing.pid)) {
+                sleepSync(LOCK_RETRY_INTERVAL_MS);
+                continue;
+            }
+            // Dead/corrupt owner — steal only this path once, then retry create.
             try {
-                const stats = statSync(lockPath);
-                if (Date.now() - stats.mtimeMs > STALE_LOCK_TIMEOUT_MS) {
-                    unlinkSync(lockPath);
-                    continue;
-                }
+                unlinkSync(lockPath);
             } catch {
-                // lock disappeared between EEXIST and stat — retry
+                // raced with another stealer
             }
             sleepSync(LOCK_RETRY_INTERVAL_MS);
         }
     }
 
-    if (fd === undefined) {
+    if (fd === undefined || !owner) {
         throw new Error(`Timed out waiting for Cursor MCP overlay lock: ${lockPath}`);
     }
 
@@ -143,7 +191,9 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
             // ignore
         }
         try {
-            unlinkSync(lockPath);
+            if (readLockOwner(lockPath)?.token === owner.token) {
+                unlinkSync(lockPath);
+            }
         } catch {
             // ignore
         }
