@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { clearGeneratedImages, decodeGeneratedImageBase64, detectImageMimeType, detectVideoMimeType, getGeneratedImage, MAX_GENERATED_IMAGE_BASE64_CHARS, registerGeneratedImage, registerGeneratedImageFromAcpBlock, registerGeneratedImageFromPath } from './generatedImages'
+import { clearGeneratedImages, decodeGeneratedImageBase64, detectImageMimeType, detectVideoMimeType, getGeneratedImage, MAX_GENERATED_IMAGE_BASE64_CHARS, registerGeneratedImage, registerGeneratedImageFromAcpBlock, registerGeneratedImageFromPath, safeAcpFileName } from './generatedImages'
 
 describe('generatedImages', () => {
     it('detects supported image MIME types from file bytes', () => {
@@ -155,4 +155,20 @@ describe('generatedImages', () => {
         clearGeneratedImages()
     })
 
+    it('safeAcpFileName rejects data URIs and strips signed URL query secrets', async () => {
+        expect(safeAcpFileName('data:image/png;base64,AAAA')).toBeNull()
+        expect(safeAcpFileName('https://cdn.example/img/shot.png?token=secret')).toBe('shot.png')
+        expect(safeAcpFileName('file:///tmp/photos/icon.png')).toBe('icon.png')
+
+        const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00])
+        const image = await registerGeneratedImageFromAcpBlock({
+            type: 'image',
+            mimeType: 'image/png',
+            data: pngHeader.toString('base64'),
+            uri: 'data:image/png;base64,' + pngHeader.toString('base64'),
+        })
+        expect(image?.fileName).toMatch(/^generated-/)
+        expect(image?.fileName.startsWith('data:')).toBe(false)
+        clearGeneratedImages()
+    })
 })

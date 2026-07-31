@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +7,8 @@ import {
     CURSOR_HAPI_MCP_SERVER_ID,
     cursorHapiMcpServerId,
     installCursorMcpOverlay,
+    withMcpJsonLock,
+    writeMcpJsonAtomic,
 } from './cursorMcpOverlay';
 
 describe('installCursorMcpOverlay', () => {
@@ -242,5 +244,28 @@ describe('installCursorMcpOverlay', () => {
         }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow();
         // Malformed project config must stay untouched for the launcher try/catch path.
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
+    });
+
+    it('writeMcpJsonAtomic replaces via rename and withMcpJsonLock serializes writers', () => {
+        const cwd = makeProjectDir();
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        mkdirSync(join(cwd, '.cursor'), { recursive: true });
+        const lockPath = `${mcpPath}.hapi.lock`;
+
+        writeMcpJsonAtomic(mcpPath, {
+            mcpServers: { a: { command: 'a', args: [] } },
+        });
+        expect(JSON.parse(readFileSync(mcpPath, 'utf-8')).mcpServers.a.command).toBe('a');
+
+        const order: string[] = [];
+        withMcpJsonLock(lockPath, () => {
+            order.push('outer-enter');
+            // Nested attempt would deadlock if same process re-entered; instead verify
+            // exclusive create fails while lock is held.
+            expect(() => openSync(lockPath, 'wx')).toThrow();
+            order.push('outer-exit');
+        });
+        expect(order).toEqual(['outer-enter', 'outer-exit']);
+        expect(existsSync(lockPath)).toBe(false);
     });
 });

@@ -251,6 +251,27 @@ function parseAcpImageUri(uri: string): string | null {
     return uri
 }
 
+/** Bound safe display name from an ACP uri/url — never reuse raw data/signed URLs. */
+export function safeAcpFileName(uri: string | undefined | null): string | null {
+    if (!uri) return null
+    try {
+        if (uri.startsWith('file://')) {
+            return basename(fileURLToPath(uri)).slice(0, 255) || null
+        }
+        if (/^https?:\/\//i.test(uri)) {
+            const name = basename(new URL(uri).pathname)
+            return name.slice(0, 255) || null
+        }
+        // Reject scheme-bearing forms (data:, blob:, etc.) — only bare paths.
+        if (!uri.includes(':')) {
+            return basename(uri).slice(0, 255) || null
+        }
+    } catch {
+        return null
+    }
+    return null
+}
+
 export async function registerGeneratedImageFromAcpBlock(block: unknown): Promise<GeneratedImageMetadata | null> {
     if (!isObject(block) || block.type !== 'image') {
         return null
@@ -272,11 +293,12 @@ export async function registerGeneratedImageFromAcpBlock(block: unknown): Promis
         if (declaredMimeType && declaredMimeType !== sniffedMimeType) {
             return null
         }
-        const path = uri ? parseAcpImageUri(uri) ?? uri : `${randomUUID()}.bin`
+        const localPath = uri ? parseAcpImageUri(uri) : null
+        const fileName = safeAcpFileName(uri) ?? `generated-${randomUUID()}.png`
         return registerGeneratedImage({
             id: randomUUID(),
-            path,
-            fileName: basename(path),
+            path: localPath ?? fileName,
+            fileName,
             mimeType: sniffedMimeType,
             bytes
         })

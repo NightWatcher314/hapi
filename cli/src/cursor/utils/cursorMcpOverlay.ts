@@ -4,8 +4,20 @@
  * See https://forum.cursor.com/t/acp-agent-silently-ignores-mcpservers-in-session-new/153623
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+    closeSync,
+    existsSync,
+    mkdirSync,
+    openSync,
+    readFileSync,
+    renameSync,
+    rmSync,
+    statSync,
+    unlinkSync,
+    writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { logger } from '@/ui/logger';
 
@@ -47,6 +59,10 @@ type EnableCursorMcpResult = {
 
 export type EnableCursorMcp = (cwd: string, id: string) => EnableCursorMcpResult;
 
+const LOCK_RETRY_INTERVAL_MS = 50;
+const MAX_LOCK_ATTEMPTS = 100;
+const STALE_LOCK_TIMEOUT_MS = 10_000;
+
 function defaultEnableCursorMcp(cwd: string, id: string): EnableCursorMcpResult {
     return spawnSync('agent', ['mcp', 'enable', id], {
         cwd,
@@ -70,8 +86,68 @@ function readMcpJson(path: string): CursorMcpJson {
     return parseMcpJson(readFileSync(path, 'utf-8'));
 }
 
-function writeMcpJson(path: string, config: CursorMcpJson): void {
-    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, 'utf-8');
+/** Atomic replace so readers never see a partial mcp.json. */
+export function writeMcpJsonAtomic(path: string, config: CursorMcpJson): void {
+    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf-8');
+    renameSync(tmp, path);
+}
+
+function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Exclusive cross-process lock for mcp.json read-modify-write.
+ * Uses create-exclusive lockfile (same pattern as settings persistence).
+ */
+export function withMcpJsonLock(lockPath: string, fn: () => void): void {
+    let attempts = 0;
+    let fd: number | undefined;
+
+    while (attempts < MAX_LOCK_ATTEMPTS) {
+        try {
+            fd = openSync(lockPath, 'wx');
+            break;
+        } catch (err: unknown) {
+            const code = err && typeof err === 'object' && 'code' in err
+                ? (err as { code?: string }).code
+                : undefined;
+            if (code !== 'EEXIST') {
+                throw err;
+            }
+            attempts++;
+            try {
+                const stats = statSync(lockPath);
+                if (Date.now() - stats.mtimeMs > STALE_LOCK_TIMEOUT_MS) {
+                    unlinkSync(lockPath);
+                    continue;
+                }
+            } catch {
+                // lock disappeared between EEXIST and stat — retry
+            }
+            sleepSync(LOCK_RETRY_INTERVAL_MS);
+        }
+    }
+
+    if (fd === undefined) {
+        throw new Error(`Timed out waiting for Cursor MCP overlay lock: ${lockPath}`);
+    }
+
+    try {
+        fn();
+    } finally {
+        try {
+            closeSync(fd);
+        } catch {
+            // ignore
+        }
+        try {
+            unlinkSync(lockPath);
+        } catch {
+            // ignore
+        }
+    }
 }
 
 function sameMcpEntry(a: McpServerEntry | undefined, b: McpServerEntry | undefined): boolean {
@@ -85,6 +161,9 @@ function sameMcpEntry(a: McpServerEntry | undefined, b: McpServerEntry | undefin
  * Cleanup undoes only the exact entry this session installed under `serverId` (or restores a
  * pre-existing value for that same id). Concurrent edits to other mcpServers keys — and to
  * this id when it no longer matches the installed overlay — survive the session.
+ *
+ * Install and cleanup serialize via a lockfile and write mcp.json atomically so concurrent
+ * CLI processes in the same cwd cannot clobber each other's `hapi-*` entries.
  */
 export function installCursorMcpOverlay(
     cwd: string,
@@ -98,28 +177,34 @@ export function installCursorMcpOverlay(
 
     const cursorDir = join(cwd, '.cursor');
     const mcpJsonPath = join(cursorDir, 'mcp.json');
+    const lockPath = `${mcpJsonPath}.hapi.lock`;
     mkdirSync(cursorDir, { recursive: true });
-
-    const hadFile = existsSync(mcpJsonPath);
-    const previous = hadFile ? readMcpJson(mcpJsonPath) : { mcpServers: {} as Record<string, McpServerEntry> };
-    previous.mcpServers ??= {};
-    const hadServer = Object.prototype.hasOwnProperty.call(previous.mcpServers, serverId);
-    const previousServer = hadServer ? previous.mcpServers[serverId] : undefined;
 
     const installedHapi: McpServerEntry = {
         command: bridge.command,
         args: [...bridge.args],
     };
 
-    const config: CursorMcpJson = {
-        ...previous,
-        mcpServers: {
-            ...previous.mcpServers,
-            [serverId]: installedHapi,
-        },
-    };
+    let hadFile = false;
+    let hadServer = false;
+    let previousServer: McpServerEntry | undefined;
 
-    writeMcpJson(mcpJsonPath, config);
+    withMcpJsonLock(lockPath, () => {
+        hadFile = existsSync(mcpJsonPath);
+        const previous = hadFile ? readMcpJson(mcpJsonPath) : { mcpServers: {} as Record<string, McpServerEntry> };
+        previous.mcpServers ??= {};
+        hadServer = Object.prototype.hasOwnProperty.call(previous.mcpServers, serverId);
+        previousServer = hadServer ? previous.mcpServers[serverId] : undefined;
+
+        const config: CursorMcpJson = {
+            ...previous,
+            mcpServers: {
+                ...previous.mcpServers,
+                [serverId]: installedHapi,
+            },
+        };
+        writeMcpJsonAtomic(mcpJsonPath, config);
+    });
 
     const enable = (options.enableCursorMcp ?? defaultEnableCursorMcp)(cwd, serverId);
 
@@ -135,32 +220,34 @@ export function installCursorMcpOverlay(
     return {
         cleanup: () => {
             try {
-                if (!existsSync(mcpJsonPath)) {
-                    return;
-                }
+                withMcpJsonLock(lockPath, () => {
+                    if (!existsSync(mcpJsonPath)) {
+                        return;
+                    }
 
-                const current = readMcpJson(mcpJsonPath);
-                current.mcpServers ??= {};
+                    const current = readMcpJson(mcpJsonPath);
+                    current.mcpServers ??= {};
 
-                const currentServer = current.mcpServers[serverId];
-                if (!sameMcpEntry(currentServer, installedHapi)) {
-                    // User/Cursor replaced or removed our overlay entry — leave alone.
-                    return;
-                }
+                    const currentServer = current.mcpServers[serverId];
+                    if (!sameMcpEntry(currentServer, installedHapi)) {
+                        // User/Cursor replaced or removed our overlay entry — leave alone.
+                        return;
+                    }
 
-                if (hadServer && previousServer) {
-                    current.mcpServers[serverId] = previousServer;
-                } else {
-                    delete current.mcpServers[serverId];
-                }
+                    if (hadServer && previousServer) {
+                        current.mcpServers[serverId] = previousServer;
+                    } else {
+                        delete current.mcpServers[serverId];
+                    }
 
-                const remaining = Object.keys(current.mcpServers);
-                if (!hadFile && remaining.length === 0) {
-                    rmSync(mcpJsonPath, { force: true });
-                    return;
-                }
+                    const remaining = Object.keys(current.mcpServers);
+                    if (!hadFile && remaining.length === 0) {
+                        rmSync(mcpJsonPath, { force: true });
+                        return;
+                    }
 
-                writeMcpJson(mcpJsonPath, current);
+                    writeMcpJsonAtomic(mcpJsonPath, current);
+                });
             } catch (error) {
                 logger.debug('[cursor-acp] cursor MCP overlay cleanup failed', error);
             }
