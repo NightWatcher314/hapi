@@ -52,12 +52,13 @@ function isGeneratedImageBlock(value: unknown): value is GeneratedImageBlock {
 
 const MIN_INLINE_IMAGE_DIMENSION = 64
 
-function computeTinyImageScale(width: number, height: number): number {
-    const minDim = Math.min(width, height)
-    if (minDim <= 0 || minDim >= MIN_INLINE_IMAGE_DIMENSION) {
+/** Scale tiny icons up for readability without exploding skinny/tall images. */
+export function computeTinyImageScale(width: number, height: number): number {
+    const maxDim = Math.max(width, height)
+    if (width <= 0 || height <= 0 || maxDim >= MIN_INLINE_IMAGE_DIMENSION) {
         return 1
     }
-    return Math.min(MIN_INLINE_IMAGE_DIMENSION / minDim, 16)
+    return Math.min(MIN_INLINE_IMAGE_DIMENSION / maxDim, 16)
 }
 
 function GeneratedImageCard(props: { block: GeneratedImageBlock }) {

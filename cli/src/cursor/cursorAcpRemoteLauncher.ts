@@ -33,7 +33,11 @@ import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/c
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
-import { installCursorMcpOverlay, type CursorMcpOverlayHandle } from './utils/cursorMcpOverlay';
+import {
+    cursorHapiMcpServerId,
+    installCursorMcpOverlay,
+    type CursorMcpOverlayHandle,
+} from './utils/cursorMcpOverlay';
 
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
@@ -86,6 +90,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 this.cursorMcpOverlay = installCursorMcpOverlay(session.path, {
                     command: hapiBridge.command,
                     args: hapiBridge.args,
+                }, {
+                    serverId: cursorHapiMcpServerId(session.client.sessionId),
                 });
             } catch (error) {
                 logger.warn(

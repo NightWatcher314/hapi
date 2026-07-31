@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { CURSOR_HAPI_MCP_SERVER_ID, installCursorMcpOverlay } from './cursorMcpOverlay';
+import {
+    CURSOR_HAPI_MCP_SERVER_ID,
+    cursorHapiMcpServerId,
+    installCursorMcpOverlay,
+} from './cursorMcpOverlay';
 
 describe('installCursorMcpOverlay', () => {
     const roots: string[] = [];
@@ -27,35 +31,77 @@ describe('installCursorMcpOverlay', () => {
         return root;
     }
 
-    it('writes hapi bridge into .cursor/mcp.json and removes only hapi on cleanup', () => {
+    it('writes per-session bridge into .cursor/mcp.json and removes only that id on cleanup', () => {
         const cwd = makeProjectDir(JSON.stringify({
             mcpServers: {
                 other: { command: 'echo', args: ['x'] },
             },
         }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-a');
 
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
 
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        }, { enableCursorMcp: noopEnable });
+        }, { serverId, enableCursorMcp: noopEnable });
 
         const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
             mcpServers: Record<string, { command: string; args: string[] }>;
         };
         expect(merged.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
-        expect(merged.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toEqual({
+        expect(merged.mcpServers[serverId]).toEqual({
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
         });
+        expect(merged.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toBeUndefined();
 
         handle.cleanup();
         const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
             mcpServers: Record<string, { command: string; args: string[] }>;
         };
         expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
-        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toBeUndefined();
+        expect(after.mcpServers[serverId]).toBeUndefined();
+    });
+
+    it('leaves a newer session bridge intact when an older session cleans up first', () => {
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2));
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        const idA = cursorHapiMcpServerId('session-a');
+        const idB = cursorHapiMcpServerId('session-b');
+
+        const handleA = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:1111/'],
+        }, { serverId: idA, enableCursorMcp: noopEnable });
+
+        const handleB = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:2222/'],
+        }, { serverId: idB, enableCursorMcp: noopEnable });
+
+        handleA.cleanup();
+
+        const afterA = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(afterA.mcpServers[idA]).toBeUndefined();
+        expect(afterA.mcpServers[idB]).toEqual({
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:2222/'],
+        });
+
+        handleB.cleanup();
+
+        const afterB = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(afterB.mcpServers[idB]).toBeUndefined();
+        expect(afterB.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
     });
 
     it('preserves mcpServers keys added during the session on cleanup', () => {
@@ -64,17 +110,18 @@ describe('installCursorMcpOverlay', () => {
                 other: { command: 'echo', args: ['x'] },
             },
         }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-a');
 
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        }, { enableCursorMcp: noopEnable });
+        }, { serverId, enableCursorMcp: noopEnable });
 
         writeFileSync(mcpPath, JSON.stringify({
             mcpServers: {
                 other: { command: 'echo', args: ['x'] },
-                [CURSOR_HAPI_MCP_SERVER_ID]: {
+                [serverId]: {
                     command: '/bin/hapi',
                     args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
                 },
@@ -89,14 +136,15 @@ describe('installCursorMcpOverlay', () => {
         };
         expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
         expect(after.mcpServers.concurrent).toEqual({ command: 'npx', args: ['-y', 'some-mcp'] });
-        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toBeUndefined();
+        expect(after.mcpServers[serverId]).toBeUndefined();
     });
 
-    it('restores a pre-existing hapi entry instead of deleting it', () => {
-        const priorHapi = { command: 'old-hapi', args: ['mcp'] };
+    it('restores a pre-existing entry for the same server id instead of deleting it', () => {
+        const serverId = cursorHapiMcpServerId('session-a');
+        const prior = { command: 'old-hapi', args: ['mcp'] };
         const cwd = makeProjectDir(JSON.stringify({
             mcpServers: {
-                [CURSOR_HAPI_MCP_SERVER_ID]: priorHapi,
+                [serverId]: prior,
             },
         }, null, 2));
 
@@ -104,34 +152,59 @@ describe('installCursorMcpOverlay', () => {
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        }, { enableCursorMcp: noopEnable });
+        }, { serverId, enableCursorMcp: noopEnable });
 
         handle.cleanup();
 
         const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
             mcpServers: Record<string, { command: string; args: string[] }>;
         };
-        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toEqual(priorHapi);
+        expect(after.mcpServers[serverId]).toEqual(prior);
     });
 
-    it('preserves a mid-session replacement of the hapi entry on cleanup', () => {
+    it('does not touch a legacy shared hapi key when using a per-session id', () => {
+        const legacyHapi = { command: 'user-hapi', args: ['mcp', '--custom'] };
         const cwd = makeProjectDir(JSON.stringify({
             mcpServers: {
-                other: { command: 'echo', args: ['x'] },
+                [CURSOR_HAPI_MCP_SERVER_ID]: legacyHapi,
             },
         }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-a');
 
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
         const handle = installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        }, { enableCursorMcp: noopEnable });
+        }, { serverId, enableCursorMcp: noopEnable });
 
-        const userOwnedHapi = { command: 'user-hapi', args: ['mcp', '--custom'] };
+        handle.cleanup();
+
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toEqual(legacyHapi);
+        expect(after.mcpServers[serverId]).toBeUndefined();
+    });
+
+    it('preserves a mid-session replacement of the session entry on cleanup', () => {
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-a');
+
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        const userOwned = { command: 'user-hapi', args: ['mcp', '--custom'] };
         writeFileSync(mcpPath, JSON.stringify({
             mcpServers: {
                 other: { command: 'echo', args: ['x'] },
-                [CURSOR_HAPI_MCP_SERVER_ID]: userOwnedHapi,
+                [serverId]: userOwned,
             },
         }, null, 2) + '\n', 'utf-8');
 
@@ -140,18 +213,19 @@ describe('installCursorMcpOverlay', () => {
         const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
             mcpServers: Record<string, { command: string; args: string[] }>;
         };
-        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toEqual(userOwnedHapi);
+        expect(after.mcpServers[serverId]).toEqual(userOwned);
         expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
     });
 
-    it('creates .cursor/mcp.json when missing and removes file when only hapi was present', () => {
+    it('creates .cursor/mcp.json when missing and removes file when only the session entry was present', () => {
         const cwd = makeProjectDir();
+        const serverId = cursorHapiMcpServerId('session-a');
         expect(existsSync(join(cwd, '.cursor', 'mcp.json'))).toBe(false);
 
         const handle = installCursorMcpOverlay(cwd, {
             command: 'hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:9999/'],
-        }, { enableCursorMcp: noopEnable });
+        }, { serverId, enableCursorMcp: noopEnable });
 
         const mcpPath = join(cwd, '.cursor', 'mcp.json');
         expect(existsSync(mcpPath)).toBe(true);
@@ -165,7 +239,7 @@ describe('installCursorMcpOverlay', () => {
         expect(() => installCursorMcpOverlay(cwd, {
             command: 'hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:9999/'],
-        }, { enableCursorMcp: noopEnable })).toThrow();
+        }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow();
         // Malformed project config must stay untouched for the launcher try/catch path.
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
     });
