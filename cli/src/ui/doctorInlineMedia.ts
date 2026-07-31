@@ -6,6 +6,7 @@ import chalk from 'chalk'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { configuration } from '@/configuration'
+import { buildHubRequestHeaders } from '@/api/hubExtraHeaders'
 import { readSettings } from '@/persistence'
 import { projectPath } from '@/projectPath'
 import { cursorHapiMcpServerId } from '@/cursor/utils/cursorMcpOverlay'
@@ -42,6 +43,11 @@ function mcpSdkResolvable(): boolean {
     return candidates.some((p) => existsSync(p))
 }
 
+/** POSIX-safe single-quote wrapping (handles embedded quotes). */
+export function shellSingleQuote(value: string): string {
+    return `'${value.replaceAll("'", "'\"'\"'")}'`
+}
+
 async function hubJwt(): Promise<string | null> {
     const settings = await readSettings()
     const token = process.env.CLI_API_TOKEN ?? settings.cliApiToken
@@ -50,7 +56,7 @@ async function hubJwt(): Promise<string | null> {
     }
     const res = await fetch(`${configuration.apiUrl}/api/auth`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildHubRequestHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ accessToken: token }),
     })
     if (!res.ok) {
@@ -76,13 +82,13 @@ export function formatInlineMediaCommand(
     samplePath = '/absolute/path/to/image.png'
 ): string {
     const scriptDir = resolve(scriptPath, '..', '..', '..')
-    const q = (value: string) => JSON.stringify(value)
+    const q = shellSingleQuote
     return `cd ${q(scriptDir)} && bun scripts/tooling/hapi-display-image.mjs ${q(sessionPrefix)} ${q(samplePath)} "title"`
 }
 
 export async function collectInlineMediaSessionBridges(jwt: string): Promise<InlineMediaSessionBridge[]> {
     const listRes = await fetch(`${configuration.apiUrl}/api/sessions?limit=200`, {
-        headers: { Authorization: `Bearer ${jwt}` },
+        headers: buildHubRequestHeaders({ Authorization: `Bearer ${jwt}` }),
     })
     if (!listRes.ok) {
         throw new Error(`sessions list failed: ${listRes.status}`)
@@ -100,7 +106,7 @@ export async function collectInlineMediaSessionBridges(jwt: string): Promise<Inl
 
         const detailRes = await fetch(
             `${configuration.apiUrl}/api/sessions/${encodeURIComponent(summary.id)}`,
-            { headers: { Authorization: `Bearer ${jwt}` } }
+            { headers: buildHubRequestHeaders({ Authorization: `Bearer ${jwt}` }) }
         )
         if (!detailRes.ok) continue
         const detailBody = (await detailRes.json()) as { session?: unknown }
@@ -131,15 +137,15 @@ export async function runDoctorInlineMedia(): Promise<number> {
     const scriptExists = existsSync(scriptPath)
     checks.push({
         ok: scriptExists,
-        label: 'Helper script',
-        detail: scriptExists ? scriptPath : `missing: ${scriptPath}`,
+        label: 'Helper script (repo shell fallback)',
+        detail: scriptExists ? scriptPath : `missing: ${scriptPath} (optional outside source checkout)`,
     })
 
     const sdkOk = mcpSdkResolvable()
     checks.push({
         ok: sdkOk,
-        label: '@modelcontextprotocol/sdk',
-        detail: sdkOk ? 'resolvable from cli or repo root' : 'not found — run bun install from repo root',
+        label: '@modelcontextprotocol/sdk (repo shell fallback)',
+        detail: sdkOk ? 'resolvable from cli or repo root' : 'not found — optional outside source checkout',
     })
 
     const envSessionId = process.env.HAPI_SESSION_ID
@@ -164,7 +170,9 @@ export async function runDoctorInlineMedia(): Promise<number> {
     })
 
     for (const check of checks) {
-        const mark = check.ok ? chalk.green('✓') : chalk.red('✗')
+        const mark = check.ok
+            ? chalk.green('✓')
+            : (check.label === 'Hub auth' ? chalk.red('✗') : chalk.yellow('○'))
         console.log(`${mark} ${check.label}: ${chalk.gray(check.detail)}`)
     }
 
@@ -184,6 +192,7 @@ export async function runDoctorInlineMedia(): Promise<number> {
 
     const withBridge = bridges.filter((b) => b.hapiMcpUrl)
     const listOmitsMcp = bridges.some((b) => b.hapiMcpUrl && !b.listShowsMcpUrl)
+    const shellFallbackAvailable = scriptExists && sdkOk
 
     console.log(chalk.bold('\nActive sessions'))
     if (bridges.length === 0) {
@@ -198,7 +207,9 @@ export async function runDoctorInlineMedia(): Promise<number> {
             )
             if (b.hapiMcpUrl) {
                 console.log(chalk.gray(`    mcp: ${b.hapiMcpUrl}`))
-                console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, b.prefix)}`))
+                if (shellFallbackAvailable) {
+                    console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, b.prefix)}`))
+                }
             }
         }
     }
@@ -222,20 +233,21 @@ export async function runDoctorInlineMedia(): Promise<number> {
 
     console.log(chalk.bold('\nAgent inline path'))
     console.log(chalk.gray('  1. MCP tool display_image / display_video in the running session (ACP flavors via hapi bridge)'))
-    console.log(chalk.gray('  2. Shell fallback (HAPI session id prefix, not cursorSessionId):'))
-    if (withBridge.length > 0) {
-        console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, withBridge[0].prefix)}`))
-    } else if (envSessionId) {
-        console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, envSessionId.slice(0, 8))}`))
+    if (shellFallbackAvailable) {
+        console.log(chalk.gray('  2. Shell fallback (HAPI session id prefix, not cursorSessionId):'))
+        if (withBridge.length > 0) {
+            console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, withBridge[0].prefix)}`))
+        } else if (envSessionId) {
+            console.log(chalk.green(`    ${formatInlineMediaCommand(scriptPath, envSessionId.slice(0, 8))}`))
+        } else {
+            console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, '<hapi-session-prefix>')}`))
+        }
     } else {
-        console.log(chalk.gray(`    ${formatInlineMediaCommand(scriptPath, '<hapi-session-prefix>')}`))
+        console.log(chalk.gray('  2. Shell fallback unavailable (packaged install / no repo checkout) — use MCP tools only'))
     }
 
-    const ok =
-        scriptExists
-        && sdkOk
-        && jwt !== null
-        && (withBridge.length > 0 || Boolean(envSessionId))
+    // Core health: hub auth + live bridge or session id. Repo shell helper is optional.
+    const ok = jwt !== null && (withBridge.length > 0 || Boolean(envSessionId))
 
     if (ok) {
         console.log(chalk.green('\n✓ Inline media path available\n'))
