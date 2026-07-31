@@ -369,14 +369,23 @@ describe('CursorExtensionAdapter', () => {
 
     it('rejects oversized generate_image base64 before decode', async () => {
         const { handlers, getMessages } = createHarness();
+        const huge = 'A'.repeat(Math.ceil(25 * 1024 * 1024 * 4 / 3) + 5);
         await handlers.get('cursor/generate_image')!({
             toolCallId: 'img-huge',
             description: 'Too big',
-            imageData: 'A'.repeat(Math.ceil(25 * 1024 * 1024 * 4 / 3) + 5),
+            imageData: huge,
         }, null);
 
         expect(getMessages().map((m) => m.type)).toEqual(['tool_call', 'tool_result']);
         expect(getMessages().some((m) => m.type === 'generated_image')).toBe(false);
+        const toolCall = getMessages()[0];
+        expect(toolCall).toMatchObject({
+            type: 'tool_call',
+            input: expect.objectContaining({ imageDataChars: huge.length }),
+        });
+        if (toolCall.type === 'tool_call') {
+            expect(toolCall.input).not.toHaveProperty('imageData');
+        }
     });
 
     it('still emits tool_call/result when generate_image has no path or bytes', async () => {

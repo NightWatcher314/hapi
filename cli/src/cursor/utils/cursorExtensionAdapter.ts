@@ -206,11 +206,12 @@ export class CursorExtensionAdapter {
     private async handleGenerateImage(params: unknown): Promise<void> {
         if (!isObject(params)) return;
         const toolCallId = extractToolCallId(params) ?? `cursor-image-${randomUUID()}`;
+        const safeParams = summarizeGenerateImageParams(params);
         this.onMessage({
             type: 'tool_call',
             id: toolCallId,
             name: 'CursorGenerateImage',
-            input: params,
+            input: safeParams,
             status: 'completed'
         });
 
@@ -230,13 +231,19 @@ export class CursorExtensionAdapter {
                 source,
             });
         } else {
-            logger.debug('[cursor-acp] cursor/generate_image had no registrable image bytes/path', params);
+            const imageData = asString(params.imageData)
+                ?? asString(params.image_data)
+                ?? asString(params.data);
+            logger.debug('[cursor-acp] cursor/generate_image rejected', {
+                toolCallId,
+                imageDataChars: typeof imageData === 'string' ? imageData.length : 0,
+            });
         }
 
         this.onMessage({
             type: 'tool_result',
             id: toolCallId,
-            output: params,
+            output: safeParams,
             status: 'completed'
         });
     }
@@ -331,6 +338,21 @@ async function registerCursorGeneratedImage(params: Record<string, unknown>) {
     }
 
     return null;
+}
+
+/** Drop raw base64 from chat/logs; keep length so rejects stay diagnosable. */
+function summarizeGenerateImageParams(params: Record<string, unknown>): Record<string, unknown> {
+    const imageData = asString(params.imageData)
+        ?? asString(params.image_data)
+        ?? asString(params.data);
+    const summary: Record<string, unknown> = { ...params };
+    delete summary.imageData;
+    delete summary.image_data;
+    delete summary.data;
+    if (typeof imageData === 'string') {
+        summary.imageDataChars = imageData.length;
+    }
+    return summary;
 }
 
 function extractToolCallId(params: unknown): string | null {
