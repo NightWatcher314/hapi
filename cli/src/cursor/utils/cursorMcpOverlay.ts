@@ -65,7 +65,6 @@ export type EnableCursorMcp = (cwd: string, id: string) => EnableCursorMcpResult
 
 const LOCK_RETRY_INTERVAL_MS = 50;
 const MAX_LOCK_ATTEMPTS = 100;
-const ORPHAN_LOCK_STALE_MS = 10_000;
 
 function defaultEnableCursorMcp(cwd: string, id: string): EnableCursorMcpResult {
     return spawnSync('agent', ['mcp', 'enable', id], {
@@ -142,34 +141,11 @@ export function isProcessAlive(pid: number): boolean {
     }
 }
 
-function tryStealOrphanLock(lockPath: string): void {
-    const existing = readLockOwner(lockPath);
-    if (existing) {
-        if (isProcessAlive(existing.pid)) {
-            return;
-        }
-    } else {
-        // Corrupt/empty: only steal after it has aged (avoids racing a writer mid-publish).
-        try {
-            const ageMs = Date.now() - statSync(lockPath).mtimeMs;
-            if (ageMs < ORPHAN_LOCK_STALE_MS) {
-                return;
-            }
-        } catch {
-            return;
-        }
-    }
-    try {
-        unlinkSync(lockPath);
-    } catch {
-        // raced with another stealer / owner release
-    }
-}
-
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.
  * Owner JSON is published atomically via link(2) from a fully-written staging file.
- * Only a dead owner (or aged corrupt lock) may be stolen; release unlinks only our token.
+ * Stale/dead locks fail closed (manual removal) — stealing by pathname is not identity-safe.
+ * Release unlinks only when the path still holds this owner's token.
  */
 export function withMcpJsonLock(lockPath: string, fn: () => void): void {
     let attempts = 0;
@@ -195,14 +171,24 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
                     throw err;
                 }
                 attempts++;
-                tryStealOrphanLock(lockPath);
-                sleepSync(LOCK_RETRY_INTERVAL_MS);
+                const existing = readLockOwner(lockPath);
+                if (existing && isProcessAlive(existing.pid)) {
+                    sleepSync(LOCK_RETRY_INTERVAL_MS);
+                } else {
+                    // Fail closed: pathname unlink of a "stale" lock can delete a successor's live lock.
+                    throw new Error(
+                        `Stale Cursor MCP overlay lock: ${lockPath}; remove it and retry`
+                    );
+                }
             } finally {
                 rmSync(candidate, { force: true });
             }
             continue;
         } catch (err: unknown) {
             rmSync(candidate, { force: true });
+            if (err instanceof Error && err.message.startsWith('Stale Cursor MCP overlay lock:')) {
+                throw err;
+            }
             const code = err && typeof err === 'object' && 'code' in err
                 ? (err as { code?: string }).code
                 : undefined;
@@ -322,8 +308,13 @@ export function installCursorMcpOverlay(
                         delete current.mcpServers[serverId];
                     }
 
-                    const remaining = Object.keys(current.mcpServers);
-                    if (!hadFile && remaining.length === 0) {
+                    const { mcpServers, ...otherTopLevel } = current;
+                    const remainingServers = Object.keys(mcpServers ?? {});
+                    if (
+                        !hadFile
+                        && remainingServers.length === 0
+                        && Object.keys(otherTopLevel).length === 0
+                    ) {
                         rmSync(mcpJsonPath, { force: true });
                         return;
                     }

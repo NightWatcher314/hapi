@@ -326,8 +326,49 @@ describe('installCursorMcpOverlay', () => {
         unlinkSync(lockPath);
     });
 
+    it('cleanup preserves concurrent top-level mcp.json fields when servers are empty', () => {
+        const cwd = makeProjectDir();
+        const serverId = cursorHapiMcpServerId('session-a');
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        writeFileSync(mcpPath, JSON.stringify({
+            mcpServers: {
+                [serverId]: {
+                    command: '/bin/hapi',
+                    args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+                },
+            },
+            inputs: [{ id: 'keep-me' }],
+        }, null, 2) + '\n', 'utf-8');
+
+        handle.cleanup();
+
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, unknown>;
+            inputs: unknown[];
+        };
+        expect(after.mcpServers[serverId]).toBeUndefined();
+        expect(after.inputs).toEqual([{ id: 'keep-me' }]);
+        expect(existsSync(mcpPath)).toBe(true);
+    });
+
     it('isProcessAlive treats EPERM as alive and ESRCH as dead', () => {
         expect(isProcessAlive(process.pid)).toBe(true);
         expect(isProcessAlive(2_147_483_646)).toBe(false);
+    });
+
+    it('fails closed on a stale lock instead of pathname-stealing', () => {
+        const cwd = makeProjectDir();
+        mkdirSync(join(cwd, '.cursor'), { recursive: true });
+        const lockPath = join(cwd, '.cursor', 'mcp.json.hapi.lock');
+        writeFileSync(lockPath, JSON.stringify({ pid: 2_147_483_646, token: 'dead-owner' }), 'utf-8');
+
+        expect(() => withMcpJsonLock(lockPath, () => {})).toThrow(/Stale Cursor MCP overlay lock/);
+        expect(readLockOwner(lockPath)?.token).toBe('dead-owner');
     });
 });
