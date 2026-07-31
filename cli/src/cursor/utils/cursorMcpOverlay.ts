@@ -274,56 +274,56 @@ export function installCursorMcpOverlay(
         writeMcpJsonAtomic(mcpJsonPath, config);
     });
 
+    const cleanup = (): void => {
+        try {
+            withMcpJsonLock(lockPath, () => {
+                if (!existsSync(mcpJsonPath)) {
+                    return;
+                }
+
+                const current = readMcpJson(mcpJsonPath);
+                current.mcpServers ??= {};
+
+                const currentServer = current.mcpServers[serverId];
+                if (!sameMcpEntry(currentServer, installedHapi)) {
+                    // User/Cursor replaced or removed our overlay entry — leave alone.
+                    return;
+                }
+
+                if (hadServer && previousServer) {
+                    current.mcpServers[serverId] = previousServer;
+                } else {
+                    delete current.mcpServers[serverId];
+                }
+
+                const { mcpServers, ...otherTopLevel } = current;
+                const remainingServers = Object.keys(mcpServers ?? {});
+                if (
+                    !hadFile
+                    && remainingServers.length === 0
+                    && Object.keys(otherTopLevel).length === 0
+                ) {
+                    rmSync(mcpJsonPath, { force: true });
+                    return;
+                }
+
+                writeMcpJsonAtomic(mcpJsonPath, current);
+            });
+        } catch (error) {
+            logger.debug('[cursor-acp] cursor MCP overlay cleanup failed', error);
+        }
+    };
+
     const enable = (options.enableCursorMcp ?? defaultEnableCursorMcp)(cwd, serverId);
 
     if (enable.status !== 0) {
         const detail = (enable.stderr || enable.stdout || '').trim();
-        logger.warn(
-            `[cursor-acp] agent mcp enable ${serverId} failed (status=${enable.status ?? 'null'}${detail ? `: ${detail}` : ''})`
+        cleanup();
+        throw new Error(
+            `agent mcp enable ${serverId} failed (status=${enable.status ?? 'null'}${detail ? `: ${detail}` : ''})`
         );
-    } else {
-        logger.debug(`[cursor-acp] enabled native MCP server ${serverId} via .cursor/mcp.json`);
     }
 
-    return {
-        cleanup: () => {
-            try {
-                withMcpJsonLock(lockPath, () => {
-                    if (!existsSync(mcpJsonPath)) {
-                        return;
-                    }
-
-                    const current = readMcpJson(mcpJsonPath);
-                    current.mcpServers ??= {};
-
-                    const currentServer = current.mcpServers[serverId];
-                    if (!sameMcpEntry(currentServer, installedHapi)) {
-                        // User/Cursor replaced or removed our overlay entry — leave alone.
-                        return;
-                    }
-
-                    if (hadServer && previousServer) {
-                        current.mcpServers[serverId] = previousServer;
-                    } else {
-                        delete current.mcpServers[serverId];
-                    }
-
-                    const { mcpServers, ...otherTopLevel } = current;
-                    const remainingServers = Object.keys(mcpServers ?? {});
-                    if (
-                        !hadFile
-                        && remainingServers.length === 0
-                        && Object.keys(otherTopLevel).length === 0
-                    ) {
-                        rmSync(mcpJsonPath, { force: true });
-                        return;
-                    }
-
-                    writeMcpJsonAtomic(mcpJsonPath, current);
-                });
-            } catch (error) {
-                logger.debug('[cursor-acp] cursor MCP overlay cleanup failed', error);
-            }
-        },
-    };
+    logger.debug(`[cursor-acp] enabled native MCP server ${serverId} via .cursor/mcp.json`);
+    return { cleanup };
 }

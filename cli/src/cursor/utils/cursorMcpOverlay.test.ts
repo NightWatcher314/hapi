@@ -371,4 +371,31 @@ describe('installCursorMcpOverlay', () => {
         expect(() => withMcpJsonLock(lockPath, () => {})).toThrow(/Stale Cursor MCP overlay lock/);
         expect(readLockOwner(lockPath)?.token).toBe('dead-owner');
     });
+
+    it('rolls back mcp.json and throws when agent mcp enable fails', () => {
+        const prior = { command: 'user-hapi', args: ['mcp'] };
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                [CURSOR_HAPI_MCP_SERVER_ID]: prior,
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-a');
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+
+        expect(() => installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, {
+            serverId,
+            enableCursorMcp: () => ({ status: 1, stderr: 'enable denied' }),
+        })).toThrow(/agent mcp enable/);
+
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(after.mcpServers[serverId]).toBeUndefined();
+        expect(after.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toEqual(prior);
+        expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
+    });
 });
