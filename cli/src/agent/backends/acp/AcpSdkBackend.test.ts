@@ -1163,6 +1163,7 @@ describe('AcpSdkBackend', () => {
             } | null;
             handleSessionUpdate: (params: unknown) => void;
             messageHandler: unknown;
+            sessionUpdateQueue: Promise<void>;
         };
         backendInternal.transport = {
             sendRequest: async () => ({ stopReason: 'end_turn' }),
@@ -1192,12 +1193,16 @@ describe('AcpSdkBackend', () => {
 
         expect(result).toBe('compact result');
         expect(handlerDuringSuppression).toBeNull();
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(false);
 
         // The previous turn's handler must be back in place afterward so
         // ordinary straggler-forwarding (covered elsewhere) is unaffected.
         expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
         emitPlanUpdate();
+        // #958 queues message-handler work (async image registration); await
+        // before asserting delivery — upstream assumed sync handleUpdate.
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
     });
 
@@ -1221,6 +1226,7 @@ describe('AcpSdkBackend', () => {
             } | null;
             handleSessionUpdate: (params: unknown) => void;
             messageHandler: unknown;
+            sessionUpdateQueue: Promise<void>;
         };
         backendInternal.transport = {
             sendRequest: async () => ({ stopReason: 'end_turn' }),
@@ -1262,12 +1268,14 @@ describe('AcpSdkBackend', () => {
         expect(handlerDuringDrainWindow).toBeNull();
         // Neither the immediate update nor the +15ms straggler leaked —
         // messageHandler was null (suppressed) for both.
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(false);
 
         expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
 
         // Normal forwarding resumes once actually restored.
         emitPlanUpdate();
+        await backendInternal.sessionUpdateQueue;
         expect(turn1.some((m) => m.type === 'plan')).toBe(true);
     });
 });
