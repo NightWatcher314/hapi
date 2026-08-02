@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
     existsSync,
     linkSync,
+    lstatSync,
     mkdirSync,
     readFileSync,
     readdirSync,
+    realpathSync,
     rmSync,
     statSync,
+    symlinkSync,
     unlinkSync,
     writeFileSync,
 } from 'node:fs';
@@ -256,6 +259,44 @@ describe('installCursorMcpOverlay', () => {
         }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow();
         // Malformed project config must stay untouched for the launcher try/catch path.
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
+    });
+
+    it('preserves a symlinked .cursor/mcp.json through install and cleanup', () => {
+        const cwd = makeProjectDir();
+        const cursorDir = join(cwd, '.cursor');
+        mkdirSync(cursorDir, { recursive: true });
+        const realConfig = join(cwd, 'shared-mcp.json');
+        writeFileSync(realConfig, `${JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2)}\n`, 'utf-8');
+        const mcpPath = join(cursorDir, 'mcp.json');
+        symlinkSync(realConfig, mcpPath);
+
+        const serverId = cursorHapiMcpServerId('session-a');
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        expect(lstatSync(mcpPath).isSymbolicLink()).toBe(true);
+        expect(realpathSync(mcpPath)).toBe(realpathSync(realConfig));
+        const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(merged.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
+        expect(merged.mcpServers[serverId]?.command).toBe('/bin/hapi');
+
+        handle.cleanup();
+
+        expect(lstatSync(mcpPath).isSymbolicLink()).toBe(true);
+        expect(realpathSync(mcpPath)).toBe(realpathSync(realConfig));
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[] }>;
+        };
+        expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
+        expect(after.mcpServers[serverId]).toBeUndefined();
     });
 
     it('writeMcpJsonAtomic preserves restrictive mode and cleans up tmp on failure path', () => {

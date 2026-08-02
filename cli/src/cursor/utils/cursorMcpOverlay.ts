@@ -7,8 +7,10 @@
 import {
     existsSync,
     linkSync,
+    lstatSync,
     mkdirSync,
     readFileSync,
+    realpathSync,
     renameSync,
     rmSync,
     statSync,
@@ -89,16 +91,21 @@ function readMcpJson(path: string): CursorMcpJson {
     return parseMcpJson(readFileSync(path, 'utf-8'));
 }
 
-/** Atomic replace so readers never see a partial mcp.json; preserves existing mode. */
+/**
+ * Atomic replace so readers never see a partial mcp.json; preserves existing mode.
+ * When `path` is a symlink, write through to the real target so the link entry stays intact.
+ */
 export function writeMcpJsonAtomic(path: string, config: CursorMcpJson): void {
-    const mode = existsSync(path) ? (statSync(path).mode & 0o777) : 0o600;
-    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const entry = lstatSync(path, { throwIfNoEntry: false });
+    const targetPath = entry?.isSymbolicLink() ? realpathSync(path) : path;
+    const mode = existsSync(targetPath) ? (statSync(targetPath).mode & 0o777) : 0o600;
+    const tmp = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
     try {
         writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
             encoding: 'utf-8',
             mode,
         });
-        renameSync(tmp, path);
+        renameSync(tmp, targetPath);
     } finally {
         rmSync(tmp, { force: true });
     }

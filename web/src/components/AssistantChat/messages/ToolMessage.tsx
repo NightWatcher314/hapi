@@ -61,14 +61,18 @@ export function computeTinyImageScale(width: number, height: number): number {
     return Math.min(MIN_INLINE_IMAGE_DIMENSION / maxDim, 16)
 }
 
-function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
+/** Exported for lazy-video fetch tests; images still fetch on mount. */
+export function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
     const ctx = useHappyChatContext()
     const [objectUrl, setObjectUrl] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [imageStyle, setImageStyle] = useState<CSSProperties | undefined>(undefined)
+    const [loadVideo, setLoadVideo] = useState(false)
     const objectUrlRef = useRef<string | null>(null)
     const isVideo = isInlineVideoMimeType(props.block.mimeType)
     const mediaLabel = generatedInlineMediaLabel(props.block.mimeType)
+    // Videos can be tens of MB; wait for explicit user intent before downloading.
+    const shouldFetch = !isVideo || loadVideo
 
     useEffect(() => {
         return () => {
@@ -80,6 +84,10 @@ function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
     }, [])
 
     useEffect(() => {
+        if (!shouldFetch) {
+            return
+        }
+
         let disposed = false
 
         if (objectUrlRef.current) {
@@ -118,7 +126,7 @@ function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
         return () => {
             disposed = true
         }
-    }, [ctx.api, ctx.sessionId, props.block.imageId, isVideo])
+    }, [ctx.api, ctx.sessionId, props.block.imageId, isVideo, shouldFetch])
 
     return (
         <div className="max-w-[92%] rounded-2xl border border-[var(--app-border)] bg-[var(--app-tool-card-bg)] p-3">
@@ -151,6 +159,14 @@ function GeneratedImageCard(props: { block: GeneratedImageBlock }) {
                 <div className="text-sm text-[var(--app-hint)]">
                     {mediaLabel} is unavailable. {error}
                 </div>
+            ) : isVideo && !loadVideo ? (
+                <button
+                    type="button"
+                    onClick={() => setLoadVideo(true)}
+                    className="flex h-48 w-72 max-w-full items-center justify-center rounded-xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] text-sm font-medium text-[var(--app-fg)]"
+                >
+                    Load video
+                </button>
             ) : (
                 <div className="h-48 w-72 max-w-full animate-pulse rounded-xl bg-[var(--app-subtle-bg)]" />
             )}
