@@ -739,9 +739,14 @@ export class AcpSdkBackend implements AgentBackend {
         }
         this.forwardSessionInfoUpdate(sessionId, update);
         this.captureUsageUpdate(update);
+        // Capture the handler at enqueue time. Looking up `this.messageHandler`
+        // when the queued microtask runs can leak a suppressUpdatesDuring
+        // update into the restored handler if earlier async image work kept
+        // the queue busy past restore.
+        const handler = this.messageHandler;
         this.sessionUpdateQueue = this.sessionUpdateQueue
             .then(async () => {
-                await this.messageHandler?.handleUpdate(update);
+                await handler?.handleUpdate(update);
             })
             .catch((error) => {
                 logger.debug(

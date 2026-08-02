@@ -28,12 +28,16 @@ type StartHappyServerOptions = {
 };
 
 /** Registered on the MCP server, but never pre-approved via Claude --allowedTools. */
-const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set(['ping_peer', 'inspect_peer']);
+const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set([
+    'display_video',
+    'ping_peer',
+    'inspect_peer'
+]);
 
 /**
  * Map HAPI MCP tool names to Claude `--allowedTools` entries.
- * Keeps `ping_peer` / `inspect_peer` off the auto-allow list so cross-session
- * write (resume+inject) and read (peer histories) still prompt.
+ * Keeps `display_video` (arbitrary local-path reader), `ping_peer`, and
+ * `inspect_peer` off the auto-allow list so they still prompt.
  */
 export function toClaudeAllowedHapiMcpTools(toolNames: string[]): string[] {
     return toolNames
