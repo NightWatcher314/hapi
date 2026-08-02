@@ -407,36 +407,39 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     }
 
     protected async cleanup(): Promise<void> {
-        this.clearAbortHandlers(this.session.client.rpcHandlerManager);
-        this.unregisterModelApplyHandler?.();
-        this.unregisterModelApplyHandler = null;
+        // Capture overlay before awaited teardown so a reject from
+        // cancelAll/disconnect cannot leave a dead hapi-* entry in .cursor/mcp.json.
+        const overlay = this.cursorMcpOverlay;
+        this.cursorMcpOverlay = null;
 
-        if (this.permissionAdapter) {
-            await this.permissionAdapter.cancelAll('Session ended');
-            this.permissionAdapter = null;
+        try {
+            this.clearAbortHandlers(this.session.client.rpcHandlerManager);
+            this.unregisterModelApplyHandler?.();
+            this.unregisterModelApplyHandler = null;
+
+            if (this.permissionAdapter) {
+                await this.permissionAdapter.cancelAll('Session ended');
+                this.permissionAdapter = null;
+            }
+
+            if (this.extensionAdapter) {
+                await this.extensionAdapter.cancelAll('Session ended');
+                this.extensionAdapter = null;
+            }
+
+            if (this.backend) {
+                await this.backend.disconnect();
+                this.backend = null;
+            }
+
+            if (this.happyServer) {
+                this.happyServer.stop();
+                this.happyServer = null;
+            }
+        } finally {
+            overlay?.cleanup();
+            setCursorAcpModelsSnapshot(null);
         }
-
-        if (this.extensionAdapter) {
-            await this.extensionAdapter.cancelAll('Session ended');
-            this.extensionAdapter = null;
-        }
-
-        if (this.backend) {
-            await this.backend.disconnect();
-            this.backend = null;
-        }
-
-        if (this.happyServer) {
-            this.happyServer.stop();
-            this.happyServer = null;
-        }
-
-        if (this.cursorMcpOverlay) {
-            this.cursorMcpOverlay.cleanup();
-            this.cursorMcpOverlay = null;
-        }
-
-        setCursorAcpModelsSnapshot(null);
     }
 
     private wireStderrErrorListener(

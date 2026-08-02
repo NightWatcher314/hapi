@@ -17,7 +17,9 @@ const harness = vi.hoisted(() => ({
     releaseSetConfigOption: null as (() => void) | null,
     deferLoadSession: null as Promise<void> | null,
     releaseLoadSession: null as (() => void) | null,
-    stderrErrorHandler: null as ((error: { type: string; message: string; raw?: string }) => void) | null
+    stderrErrorHandler: null as ((error: { type: string; message: string; raw?: string }) => void) | null,
+    disconnectError: null as Error | null,
+    overlayCleanup: null as ReturnType<typeof vi.fn> | null
 }));
 
 const legacyLauncher = vi.hoisted(() => vi.fn());
@@ -114,7 +116,11 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             refreshSessionInfo: vi.fn(async () => {}),
             onPermissionRequest: vi.fn(),
             registerExtensionRequestHandler: vi.fn(),
-            disconnect: vi.fn(async () => {})
+            disconnect: vi.fn(async () => {
+                if (harness.disconnectError) {
+                    throw harness.disconnectError;
+                }
+            })
         };
     })
 }));
@@ -142,7 +148,11 @@ vi.mock('@/codex/utils/buildHapiMcpBridge', () => ({
 }));
 
 vi.mock('./utils/cursorMcpOverlay', () => ({
-    installCursorMcpOverlay: () => ({ cleanup: () => {} }),
+    cursorHapiMcpServerId: (sessionId: string) => `hapi-${sessionId}`,
+    installCursorMcpOverlay: () => {
+        harness.overlayCleanup = vi.fn();
+        return { cleanup: harness.overlayCleanup };
+    },
 }));
 
 vi.mock('@/ui/ink/OpencodeDisplay', () => ({
@@ -184,8 +194,10 @@ function makeSession(sessionId: string | null): CursorSession {
 
 function makeClient() {
     return {
+        sessionId: 'test-session-id',
         rpcHandlerManager: {
-            registerHandler: vi.fn()
+            registerHandler: vi.fn(),
+            unregisterHandler: vi.fn()
         },
         updateMetadata: vi.fn(),
         flushMetadata: vi.fn(async () => true),
@@ -212,6 +224,8 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.deferLoadSession = null;
         harness.releaseLoadSession = null;
         harness.stderrErrorHandler = null;
+        harness.disconnectError = null;
+        harness.overlayCleanup = null;
         legacyLauncher.mockClear();
         process.stdin.isTTY = false;
         process.stdout.isTTY = false;
@@ -229,6 +243,15 @@ describe('cursorAcpRemoteLauncher', () => {
         expect(harness.backendArgs).toEqual({ command: 'agent', args: ['acp'] });
         expect(legacyLauncher).not.toHaveBeenCalled();
     });
+
+    it('removes the Cursor MCP overlay even when backend.disconnect rejects', async () => {
+        harness.disconnectError = new Error('disconnect failed');
+        const session = makeSession(null);
+
+        await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow('disconnect failed');
+        expect(harness.overlayCleanup).toHaveBeenCalled();
+    });
+
 
     it('throws on initialize failure without invoking legacy launcher', async () => {
         harness.initializeError = new Error('agent acp not found');
