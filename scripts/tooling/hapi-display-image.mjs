@@ -180,11 +180,16 @@ if (wantsSelf) {
     }
     if (!session) {
         const sessions = await listSessions()
-        const listed = sessions.find((s) => sessionMatchesPrefix(s, sessionArg))
-        if (!listed) {
-            console.error(`no session for prefix ${sessionArg} (use HAPI session id from /sessions/<uuid>, not cursorSessionId alone)`)
+        const matches = sessions.filter((candidate) => sessionMatchesPrefix(candidate, sessionArg))
+        if (matches.length !== 1) {
+            console.error(
+                matches.length === 0
+                    ? `no session for prefix ${sessionArg} (use HAPI session id from /sessions/<uuid>, not cursorSessionId alone)`
+                    : `ambiguous session prefix ${sessionArg} (${matches.length} matches); use a full HAPI session id`,
+            )
             process.exit(4)
         }
+        const listed = matches[0]
         // List summaries may omit hapiMcpUrl; detail fetch always has it when present.
         session = await fetchSessionDetail(listed.id) ?? listed
     }
