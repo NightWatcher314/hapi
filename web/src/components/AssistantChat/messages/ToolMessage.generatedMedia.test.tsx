@@ -15,7 +15,7 @@ function renderCard(options: {
         api,
         sessionId: 'session-1',
         metadata: null,
-        terminalToolDisplayMode: 'collapsed',
+        terminalToolDisplayMode: 'compact',
         disabled: false,
         onRefresh: () => {},
         hasMoreMessages: false,
