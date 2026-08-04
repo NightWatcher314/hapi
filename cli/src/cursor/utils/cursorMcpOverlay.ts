@@ -153,11 +153,104 @@ export function isProcessAlive(pid: number): boolean {
     }
 }
 
+function tryAcquireLinkLock(lockPath: string, owner: LockOwner): boolean {
+    const candidate = `${lockPath}.${owner.token}.tmp`;
+    try {
+        writeFileSync(candidate, JSON.stringify(owner), {
+            encoding: 'utf-8',
+            flag: 'wx',
+            mode: 0o600,
+        });
+        try {
+            linkSync(candidate, lockPath);
+            return true;
+        } catch (err: unknown) {
+            const code = err && typeof err === 'object' && 'code' in err
+                ? (err as { code?: string }).code
+                : undefined;
+            if (code !== 'EEXIST') {
+                throw err;
+            }
+            return false;
+        } finally {
+            rmSync(candidate, { force: true });
+        }
+    } catch (err: unknown) {
+        rmSync(candidate, { force: true });
+        const code = err && typeof err === 'object' && 'code' in err
+            ? (err as { code?: string }).code
+            : undefined;
+        if (code === 'EEXIST') {
+            return false;
+        }
+        throw err;
+    }
+}
+
+function releaseLinkLock(lockPath: string, owner: LockOwner): void {
+    try {
+        if (readLockOwner(lockPath)?.token === owner.token) {
+            unlinkSync(lockPath);
+        }
+    } catch {
+        // ignore
+    }
+}
+
+/**
+ * Serialize stale-lock recovery so two recoverers cannot both validate a dead
+ * owner and then unlink a successor's live lock.
+ */
+function withExclusiveRecoveryLock(recoveryLockPath: string, fn: () => void): void {
+    let attempts = 0;
+    let owner: LockOwner | undefined;
+
+    while (attempts < MAX_LOCK_ATTEMPTS) {
+        owner = { pid: process.pid, token: randomUUID() };
+        if (tryAcquireLinkLock(recoveryLockPath, owner)) {
+            break;
+        }
+        attempts++;
+        const existing = readLockOwner(recoveryLockPath);
+        if (existing && isProcessAlive(existing.pid)) {
+            sleepSync(LOCK_RETRY_INTERVAL_MS);
+            continue;
+        }
+        if (existing && !isProcessAlive(existing.pid)) {
+            const current = readLockOwner(recoveryLockPath);
+            if (current?.token === existing.token && !isProcessAlive(current.pid)) {
+                try {
+                    unlinkSync(recoveryLockPath);
+                } catch {
+                    // ignore
+                }
+            }
+        } else if (!existing) {
+            try {
+                unlinkSync(recoveryLockPath);
+            } catch {
+                // ignore
+            }
+        }
+        sleepSync(LOCK_RETRY_INTERVAL_MS);
+    }
+
+    if (!owner || readLockOwner(recoveryLockPath)?.token !== owner.token) {
+        throw new Error(`Timed out waiting for Cursor MCP overlay recovery lock: ${recoveryLockPath}`);
+    }
+
+    try {
+        fn();
+    } finally {
+        releaseLinkLock(recoveryLockPath, owner);
+    }
+}
+
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.
  * Owner JSON is published atomically via link(2) from a fully-written staging file.
- * Dead-PID locks are recovered only when the on-disk token still matches the
- * observed dead owner (avoids unlinking a successor's live lock).
+ * Dead-PID locks are recovered under an exclusive recovery lock after a
+ * token-matched re-read (avoids unlinking a successor's live lock).
  * Release unlinks only when the path still holds this owner's token.
  */
 export function withMcpJsonLock(lockPath: string, fn: () => void): void {
@@ -166,67 +259,38 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
 
     while (attempts < MAX_LOCK_ATTEMPTS) {
         owner = { pid: process.pid, token: randomUUID() };
-        const candidate = `${lockPath}.${owner.token}.tmp`;
+        if (tryAcquireLinkLock(lockPath, owner)) {
+            break;
+        }
+        attempts++;
+        const existing = readLockOwner(lockPath);
+        if (existing && isProcessAlive(existing.pid)) {
+            sleepSync(LOCK_RETRY_INTERVAL_MS);
+            continue;
+        }
+
         try {
-            writeFileSync(candidate, JSON.stringify(owner), {
-                encoding: 'utf-8',
-                flag: 'wx',
-                mode: 0o600,
-            });
-            try {
-                linkSync(candidate, lockPath);
-                break;
-            } catch (err: unknown) {
-                const code = err && typeof err === 'object' && 'code' in err
-                    ? (err as { code?: string }).code
-                    : undefined;
-                if (code !== 'EEXIST') {
-                    throw err;
-                }
-                attempts++;
-                const existing = readLockOwner(lockPath);
-                if (existing && isProcessAlive(existing.pid)) {
-                    sleepSync(LOCK_RETRY_INTERVAL_MS);
-                } else if (existing && !isProcessAlive(existing.pid)) {
-                    // Token-matched recovery: only unlink if the dead owner we
-                    // observed is still the lock holder (successor may have won).
+            withExclusiveRecoveryLock(`${lockPath}.recovery`, () => {
+                if (existing && !isProcessAlive(existing.pid)) {
                     const current = readLockOwner(lockPath);
                     if (current?.token === existing.token && !isProcessAlive(current.pid)) {
-                        try {
-                            unlinkSync(lockPath);
-                        } catch {
-                            // ignore — retry acquire
-                        }
+                        unlinkSync(lockPath);
                     }
-                    sleepSync(LOCK_RETRY_INTERVAL_MS);
-                } else {
-                    // Unreadable/corrupt lock — remove only if still unreadable.
-                    const current = readLockOwner(lockPath);
-                    if (!current) {
-                        try {
-                            unlinkSync(lockPath);
-                        } catch {
-                            // ignore
-                        }
-                    }
-                    sleepSync(LOCK_RETRY_INTERVAL_MS);
+                    return;
                 }
-            } finally {
-                rmSync(candidate, { force: true });
-            }
-            continue;
-        } catch (err: unknown) {
-            rmSync(candidate, { force: true });
-            const code = err && typeof err === 'object' && 'code' in err
-                ? (err as { code?: string }).code
-                : undefined;
-            if (code === 'EEXIST') {
-                attempts++;
-                sleepSync(LOCK_RETRY_INTERVAL_MS);
-                continue;
-            }
-            throw err;
+                // Unreadable/corrupt lock — remove only if still unreadable.
+                if (!readLockOwner(lockPath)) {
+                    try {
+                        unlinkSync(lockPath);
+                    } catch {
+                        // ignore
+                    }
+                }
+            });
+        } catch {
+            // Recovery lock timeout / race — retry main acquire.
         }
+        sleepSync(LOCK_RETRY_INTERVAL_MS);
     }
 
     if (!owner || !existsSync(lockPath) || readLockOwner(lockPath)?.token !== owner.token) {
@@ -236,13 +300,7 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
     try {
         fn();
     } finally {
-        try {
-            if (readLockOwner(lockPath)?.token === owner.token) {
-                unlinkSync(lockPath);
-            }
-        } catch {
-            // ignore
-        }
+        releaseLinkLock(lockPath, owner);
     }
 }
 
