@@ -779,7 +779,8 @@ function SessionPage() {
                         code: 'abort',
                         scheduledAt: null,
                         mutationStarted: true,
-                        restoreSuppressed: false
+                        restoreSuppressed: false,
+                        deliveryMode: 'queue'
                     }
                 }))
             }}

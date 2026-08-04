@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
     existsSync,
     linkSync,
@@ -17,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import {
     CURSOR_HAPI_MCP_SERVER_ID,
+    HAPI_MCP_OVERLAY_PID_ENV,
     cursorHapiMcpServerId,
     installCursorMcpOverlay,
     isProcessAlive,
@@ -69,6 +71,7 @@ describe('installCursorMcpOverlay', () => {
         expect(merged.mcpServers[serverId]).toEqual({
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+            env: { [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid) },
         });
         expect(merged.mcpServers[CURSOR_HAPI_MCP_SERVER_ID]).toBeUndefined();
 
@@ -109,6 +112,7 @@ describe('installCursorMcpOverlay', () => {
         expect(afterA.mcpServers[idB]).toEqual({
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:2222/'],
+            env: { [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid) },
         });
 
         handleB.cleanup();
@@ -258,6 +262,52 @@ describe('installCursorMcpOverlay', () => {
         }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow();
         // Malformed project config must stay untouched for the launcher try/catch path.
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
+    });
+
+    it('prunes dead hapi-* overlays stamped with HAPI_MCP_OVERLAY_PID on install', () => {
+        // spawnSync waits for exit; the returned pid is then dead.
+        const probe = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf-8' });
+        const exitedPid = probe.pid;
+        expect(typeof exitedPid).toBe('number');
+        expect(isProcessAlive(exitedPid!)).toBe(false);
+
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+                'hapi-dead': {
+                    command: '/bin/hapi',
+                    args: ['mcp', '--url', 'http://127.0.0.1:1111/'],
+                    env: { [HAPI_MCP_OVERLAY_PID_ENV]: String(exitedPid) },
+                },
+                'hapi-live': {
+                    command: '/bin/hapi',
+                    args: ['mcp', '--url', 'http://127.0.0.1:2222/'],
+                    env: { [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid) },
+                },
+                'hapi-user': {
+                    command: 'user-owned',
+                    args: [],
+                },
+            },
+        }, null, 2));
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        const serverId = cursorHapiMcpServerId('session-a');
+
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:3333/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
+        };
+        expect(merged.mcpServers['hapi-dead']).toBeUndefined();
+        expect(merged.mcpServers['hapi-live']?.command).toBe('/bin/hapi');
+        expect(merged.mcpServers['hapi-user']?.command).toBe('user-owned');
+        expect(merged.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
+        expect(merged.mcpServers[serverId]?.env?.[HAPI_MCP_OVERLAY_PID_ENV]).toBe(String(process.pid));
+
+        handle.cleanup();
     });
 
     it('refuses a symlinked .cursor/mcp.json and leaves the external target unchanged', () => {

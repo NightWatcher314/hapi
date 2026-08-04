@@ -43,6 +43,9 @@ type McpServerEntry = {
     env?: Record<string, string>;
 };
 
+/** Marks HAPI-owned overlay entries so a later launch can prune dead PIDs. */
+export const HAPI_MCP_OVERLAY_PID_ENV = 'HAPI_MCP_OVERLAY_PID';
+
 type CursorMcpJson = {
     mcpServers?: Record<string, McpServerEntry>;
 };
@@ -228,7 +231,12 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
 }
 
 function sameMcpEntry(a: McpServerEntry | undefined, b: McpServerEntry | undefined): boolean {
-    return JSON.stringify(a) === JSON.stringify(b);
+    // Ownership is command+args. Env (PID stamp) may be rewritten or omitted by
+    // concurrent edits and must not block cleanup of our overlay entry.
+    if (!a || !b) {
+        return a === b;
+    }
+    return a.command === b.command && JSON.stringify(a.args) === JSON.stringify(b.args);
 }
 
 /**
@@ -264,6 +272,7 @@ export function installCursorMcpOverlay(
     const installedHapi: McpServerEntry = {
         command: bridge.command,
         args: [...bridge.args],
+        env: { [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid) },
     };
 
     let hadFile = false;
@@ -274,6 +283,26 @@ export function installCursorMcpOverlay(
         hadFile = existsSync(mcpJsonPath);
         const previous = hadFile ? readMcpJson(mcpJsonPath) : { mcpServers: {} as Record<string, McpServerEntry> };
         previous.mcpServers ??= {};
+
+        // Crash recovery: drop prior hapi-* overlays whose owner PID is gone.
+        // Only prune entries we stamped with HAPI_MCP_OVERLAY_PID — never user-owned keys.
+        for (const [id, entry] of Object.entries(previous.mcpServers)) {
+            if (!id.startsWith('hapi-')) {
+                continue;
+            }
+            const pidRaw = entry.env?.[HAPI_MCP_OVERLAY_PID_ENV];
+            if (typeof pidRaw !== 'string' || pidRaw.trim() === '') {
+                continue;
+            }
+            const pid = Number(pidRaw);
+            if (!Number.isSafeInteger(pid) || pid <= 0) {
+                continue;
+            }
+            if (!isProcessAlive(pid)) {
+                delete previous.mcpServers[id];
+            }
+        }
+
         hadServer = Object.prototype.hasOwnProperty.call(previous.mcpServers, serverId);
         previousServer = hadServer ? previous.mcpServers[serverId] : undefined;
 
