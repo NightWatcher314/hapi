@@ -10,7 +10,6 @@ import {
     lstatSync,
     mkdirSync,
     readFileSync,
-    realpathSync,
     renameSync,
     rmSync,
     statSync,
@@ -93,19 +92,22 @@ function readMcpJson(path: string): CursorMcpJson {
 
 /**
  * Atomic replace so readers never see a partial mcp.json; preserves existing mode.
- * When `path` is a symlink, write through to the real target so the link entry stays intact.
+ * Refuses to write through a symlink — a project-controlled link could point
+ * outside `cwd`, and cleanup is not a byte-for-byte restore of the target.
  */
 export function writeMcpJsonAtomic(path: string, config: CursorMcpJson): void {
     const entry = lstatSync(path, { throwIfNoEntry: false });
-    const targetPath = entry?.isSymbolicLink() ? realpathSync(path) : path;
-    const mode = existsSync(targetPath) ? (statSync(targetPath).mode & 0o777) : 0o600;
-    const tmp = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+    if (entry?.isSymbolicLink()) {
+        throw new Error(`Refusing to write a symlinked Cursor MCP config: ${path}`);
+    }
+    const mode = existsSync(path) ? (statSync(path).mode & 0o777) : 0o600;
+    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
         writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
             encoding: 'utf-8',
             mode,
         });
-        renameSync(tmp, targetPath);
+        renameSync(tmp, path);
     } finally {
         rmSync(tmp, { force: true });
     }
@@ -253,6 +255,10 @@ export function installCursorMcpOverlay(
     const cursorDir = join(cwd, '.cursor');
     const mcpJsonPath = join(cursorDir, 'mcp.json');
     const lockPath = `${mcpJsonPath}.hapi.lock`;
+    const cursorDirEntry = lstatSync(cursorDir, { throwIfNoEntry: false });
+    if (cursorDirEntry?.isSymbolicLink()) {
+        throw new Error(`Refusing to use a symlinked Cursor config directory: ${cursorDir}`);
+    }
     mkdirSync(cursorDir, { recursive: true });
 
     const installedHapi: McpServerEntry = {

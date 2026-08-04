@@ -6,7 +6,6 @@ import {
     mkdirSync,
     readFileSync,
     readdirSync,
-    realpathSync,
     rmSync,
     statSync,
     symlinkSync,
@@ -261,42 +260,48 @@ describe('installCursorMcpOverlay', () => {
         expect(readFileSync(join(cwd, '.cursor', 'mcp.json'), 'utf-8')).toBe('{ not-json');
     });
 
-    it('preserves a symlinked .cursor/mcp.json through install and cleanup', () => {
+    it('refuses a symlinked .cursor/mcp.json and leaves the external target unchanged', () => {
         const cwd = makeProjectDir();
         const cursorDir = join(cwd, '.cursor');
         mkdirSync(cursorDir, { recursive: true });
         const realConfig = join(cwd, 'shared-mcp.json');
-        writeFileSync(realConfig, `${JSON.stringify({
+        const original = `${JSON.stringify({
             mcpServers: {
                 other: { command: 'echo', args: ['x'] },
             },
-        }, null, 2)}\n`, 'utf-8');
+        }, null, 2)}\n`;
+        writeFileSync(realConfig, original, 'utf-8');
         const mcpPath = join(cursorDir, 'mcp.json');
         symlinkSync(realConfig, mcpPath);
 
-        const serverId = cursorHapiMcpServerId('session-a');
-        const handle = installCursorMcpOverlay(cwd, {
+        expect(() => installCursorMcpOverlay(cwd, {
             command: '/bin/hapi',
             args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
-        }, { serverId, enableCursorMcp: noopEnable });
+        }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow(
+            /Refusing to write a symlinked Cursor MCP config/
+        );
 
         expect(lstatSync(mcpPath).isSymbolicLink()).toBe(true);
-        expect(realpathSync(mcpPath)).toBe(realpathSync(realConfig));
-        const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
-            mcpServers: Record<string, { command: string; args: string[] }>;
-        };
-        expect(merged.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
-        expect(merged.mcpServers[serverId]?.command).toBe('/bin/hapi');
+        expect(readFileSync(realConfig, 'utf-8')).toBe(original);
+    });
 
-        handle.cleanup();
+    it('refuses a symlinked .cursor directory before mutating MCP config', () => {
+        const cwd = makeProjectDir();
+        const realCursorDir = join(cwd, 'real-cursor');
+        mkdirSync(realCursorDir, { recursive: true });
+        const externalMcp = join(realCursorDir, 'mcp.json');
+        const original = `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`;
+        writeFileSync(externalMcp, original, 'utf-8');
+        symlinkSync(realCursorDir, join(cwd, '.cursor'));
 
-        expect(lstatSync(mcpPath).isSymbolicLink()).toBe(true);
-        expect(realpathSync(mcpPath)).toBe(realpathSync(realConfig));
-        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
-            mcpServers: Record<string, { command: string; args: string[] }>;
-        };
-        expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
-        expect(after.mcpServers[serverId]).toBeUndefined();
+        expect(() => installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId: cursorHapiMcpServerId('session-a'), enableCursorMcp: noopEnable })).toThrow(
+            /Refusing to use a symlinked Cursor config directory/
+        );
+
+        expect(readFileSync(externalMcp, 'utf-8')).toBe(original);
     });
 
     it('writeMcpJsonAtomic preserves restrictive mode and cleans up tmp on failure path', () => {
