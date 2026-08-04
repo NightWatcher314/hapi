@@ -156,7 +156,8 @@ export function isProcessAlive(pid: number): boolean {
 /**
  * Exclusive cross-process lock for mcp.json read-modify-write.
  * Owner JSON is published atomically via link(2) from a fully-written staging file.
- * Stale/dead locks fail closed (manual removal) — stealing by pathname is not identity-safe.
+ * Dead-PID locks are recovered only when the on-disk token still matches the
+ * observed dead owner (avoids unlinking a successor's live lock).
  * Release unlinks only when the path still holds this owner's token.
  */
 export function withMcpJsonLock(lockPath: string, fn: () => void): void {
@@ -186,11 +187,29 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
                 const existing = readLockOwner(lockPath);
                 if (existing && isProcessAlive(existing.pid)) {
                     sleepSync(LOCK_RETRY_INTERVAL_MS);
+                } else if (existing && !isProcessAlive(existing.pid)) {
+                    // Token-matched recovery: only unlink if the dead owner we
+                    // observed is still the lock holder (successor may have won).
+                    const current = readLockOwner(lockPath);
+                    if (current?.token === existing.token && !isProcessAlive(current.pid)) {
+                        try {
+                            unlinkSync(lockPath);
+                        } catch {
+                            // ignore — retry acquire
+                        }
+                    }
+                    sleepSync(LOCK_RETRY_INTERVAL_MS);
                 } else {
-                    // Fail closed: pathname unlink of a "stale" lock can delete a successor's live lock.
-                    throw new Error(
-                        `Stale Cursor MCP overlay lock: ${lockPath}; remove it and retry`
-                    );
+                    // Unreadable/corrupt lock — remove only if still unreadable.
+                    const current = readLockOwner(lockPath);
+                    if (!current) {
+                        try {
+                            unlinkSync(lockPath);
+                        } catch {
+                            // ignore
+                        }
+                    }
+                    sleepSync(LOCK_RETRY_INTERVAL_MS);
                 }
             } finally {
                 rmSync(candidate, { force: true });
@@ -198,9 +217,6 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
             continue;
         } catch (err: unknown) {
             rmSync(candidate, { force: true });
-            if (err instanceof Error && err.message.startsWith('Stale Cursor MCP overlay lock:')) {
-                throw err;
-            }
             const code = err && typeof err === 'object' && 'code' in err
                 ? (err as { code?: string }).code
                 : undefined;

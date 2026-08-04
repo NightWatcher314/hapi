@@ -458,14 +458,36 @@ describe('installCursorMcpOverlay', () => {
         expect(isProcessAlive(2_147_483_646)).toBe(false);
     });
 
-    it('fails closed on a stale lock instead of pathname-stealing', () => {
-        const cwd = makeProjectDir();
+    it('recovers a dead-PID lock and installs an overlay afterward', () => {
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2));
         mkdirSync(join(cwd, '.cursor'), { recursive: true });
         const lockPath = join(cwd, '.cursor', 'mcp.json.hapi.lock');
         writeFileSync(lockPath, JSON.stringify({ pid: 2_147_483_646, token: 'dead-owner' }), 'utf-8');
 
-        expect(() => withMcpJsonLock(lockPath, () => {})).toThrow(/Stale Cursor MCP overlay lock/);
-        expect(readLockOwner(lockPath)?.token).toBe('dead-owner');
+        const serverId = cursorHapiMcpServerId('session-a');
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        expect(existsSync(lockPath)).toBe(false);
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        const merged = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args?: string[] }>;
+        };
+        expect(merged.mcpServers[serverId]?.command).toBe('/bin/hapi');
+        expect(merged.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
+
+        handle.cleanup();
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, unknown>;
+        };
+        expect(after.mcpServers[serverId]).toBeUndefined();
+        expect(after.mcpServers.other).toEqual({ command: 'echo', args: ['x'] });
     });
 
     it('rolls back mcp.json and throws when agent mcp enable fails', () => {
