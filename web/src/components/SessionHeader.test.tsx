@@ -6,7 +6,10 @@ import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
 import { resolveSessionHeaderMachineLabel, SessionHeader } from './SessionHeader'
 
-afterEach(() => cleanup())
+afterEach(() => {
+    cleanup()
+    localStorage.clear()
+})
 
 function baseSession(overrides: Partial<Session> = {}): Session {
     return {
@@ -73,10 +76,83 @@ describe('resolveSessionHeaderMachineLabel', () => {
 })
 
 describe('SessionHeader', () => {
+    it('renders and toggles the agent terminal control', () => {
+        const onToggleTerminal = vi.fn()
+        render(
+            <QueryClientProvider client={new QueryClient()}>
+                <ToastProvider>
+                    <I18nProvider>
+                        <SessionHeader
+                            session={baseSession({ metadata: { flavor: 'agy', path: '/repo', host: 'machine' } })}
+                            onBack={vi.fn()}
+                            onToggleTerminal={onToggleTerminal}
+                            terminalActive
+                            api={null}
+                        />
+                    </I18nProvider>
+                </ToastProvider>
+            </QueryClientProvider>
+        )
+
+        const terminal = screen.getByRole('button', { name: 'Terminal' })
+        expect(terminal).toHaveAttribute('aria-pressed', 'true')
+        terminal.click()
+        expect(onToggleTerminal).toHaveBeenCalledOnce()
+    })
+
     it('shows an inherited catalog-default Fast tier', () => {
         renderHeader(baseSession(), { serviceTier: 'priority' })
         expect(screen.getByText('fast')).toBeInTheDocument()
         expect(screen.queryByText('reasoning default')).not.toBeInTheDocument()
+    })
+
+    it('shows Pi ordinary effort as reasoning metadata', () => {
+        renderHeader(baseSession({
+            metadata: { flavor: 'pi', path: '/repo', host: 'machine' },
+            modelReasoningEffort: null,
+            effort: 'max'
+        }))
+
+        expect(screen.getByTestId('session-header-reasoning')).toHaveTextContent('reasoning max')
+    })
+
+    it('keeps model reasoning effort for Codex and hides ordinary effort for non-Pi flavors', () => {
+        const { rerender } = renderHeader(baseSession({
+            modelReasoningEffort: 'xhigh',
+            effort: 'max'
+        }))
+
+        expect(screen.getByTestId('session-header-reasoning')).toHaveTextContent('reasoning xhigh')
+
+        rerender(
+            <QueryClientProvider client={new QueryClient()}>
+                <ToastProvider>
+                    <I18nProvider>
+                        <SessionHeader
+                            session={baseSession({
+                                metadata: { flavor: 'claude', path: '/repo', host: 'machine' },
+                                modelReasoningEffort: null,
+                                effort: 'max'
+                            })}
+                            onBack={vi.fn()}
+                            api={null}
+                        />
+                    </I18nProvider>
+                </ToastProvider>
+            </QueryClientProvider>
+        )
+
+        expect(screen.queryByTestId('session-header-reasoning')).not.toBeInTheDocument()
+    })
+
+    it('hides Pi reasoning metadata when the header reasoning setting is disabled', () => {
+        localStorage.setItem('hapi-session-header-metadata', JSON.stringify({ reasoning: false }))
+        renderHeader(baseSession({
+            metadata: { flavor: 'pi', path: '/repo', host: 'machine' },
+            effort: 'max'
+        }))
+
+        expect(screen.queryByTestId('session-header-reasoning')).not.toBeInTheDocument()
     })
 
     it('shows machine label and relative last-active age in the meta row', () => {

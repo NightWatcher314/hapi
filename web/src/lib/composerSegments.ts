@@ -1,4 +1,5 @@
 import { buildSessionReferencePath, parseSessionPathHref } from '@/lib/sessionReference'
+import { truncateGraphemes } from '@/lib/graphemes'
 import { findActiveWord } from '@/utils/findActiveWord'
 
 /** Object Replacement Character — one mirror slot per session atom. */
@@ -23,7 +24,7 @@ export type ComposerSelection = {
 }
 
 function sanitizeMentionTitle(title: string): string {
-    return title.replace(/\s+/g, ' ').trim().slice(0, 120)
+    return truncateGraphemes(title.replace(/\s+/g, ' ').trim(), 120)
 }
 
 function escapeMarkdownLinkLabel(title: string): string {
@@ -301,4 +302,17 @@ export function isRichComposerMentionsEnabled(): boolean {
     }
     if (import.meta.env.VITE_RICH_COMPOSER_MENTIONS === 'false') return false
     return true
+}
+
+/**
+ * Composer empty-state placeholder i18n key.
+ * Continue-hint outranks mention hint; mention copy only when rich composer is on.
+ */
+export function resolveComposerPlaceholderKey(opts: {
+    richMentionsEnabled: boolean
+    showContinueHint: boolean
+}): 'misc.typeMessage' | 'misc.typeAMessageWithMentions' | 'misc.typeAMessage' {
+    if (opts.showContinueHint) return 'misc.typeMessage'
+    if (opts.richMentionsEnabled) return 'misc.typeAMessageWithMentions'
+    return 'misc.typeAMessage'
 }

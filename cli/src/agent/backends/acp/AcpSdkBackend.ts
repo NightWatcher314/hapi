@@ -18,6 +18,7 @@ type AcpPromptUsage = {
     totalTokens?: number;
     thoughtTokens?: number;
     cacheReadTokens?: number;
+    cacheCreationTokens?: number;
 };
 
 type AcpUsageUpdate = {
@@ -74,6 +75,7 @@ export class AcpSdkBackend implements AgentBackend {
     private initializeResult: AcpInitializeResult | null = null;
     private setModeSupported: boolean | undefined = undefined;
     private isProcessingMessage = false;
+    private promptRequestInFlight = false;
     private responseCompleteResolvers: Array<() => void> = [];
     private lastSessionUpdateAt = 0;
     private latestUsageUpdate: AcpUsageUpdate | null = null;
@@ -391,6 +393,23 @@ export class AcpSdkBackend implements AgentBackend {
     }
 
     /**
+     * Low-level extension RPC for agent-specific methods (e.g. Grok `_x.ai/*`).
+     * Keep method names and schemas in the agent adapter — not here.
+     */
+    async sendExtensionRequest<T = unknown>(
+        method: string,
+        params: Record<string, unknown>,
+        options?: { timeoutMs?: number }
+    ): Promise<T> {
+        if (!this.transport) {
+            throw new Error('ACP transport not initialized');
+        }
+        return await this.transport.sendRequest(method, params, {
+            timeoutMs: options?.timeoutMs
+        }) as T;
+    }
+
+    /**
      * Returns the per-session models metadata captured from session/new (or
      * session/load, or session/set_model). Returns undefined if the agent did
      * not include the optional `models` block in its response.
@@ -509,10 +528,16 @@ export class AcpSdkBackend implements AgentBackend {
         try {
             // No timeout for prompt requests - they can run for extended periods
             // during complex tasks, tool-heavy operations, or slow model responses
-            const response = await this.transport.sendRequest('session/prompt', {
-                sessionId,
-                prompt: content
-            }, { timeoutMs: Infinity });
+            this.promptRequestInFlight = true;
+            let response: unknown;
+            try {
+                response = await this.transport.sendRequest('session/prompt', {
+                    sessionId,
+                    prompt: content
+                }, { timeoutMs: Infinity });
+            } finally {
+                this.promptRequestInFlight = false;
+            }
 
             stopReason = isObject(response) ? asString(response.stopReason) : null;
             promptUsage = this.extractPromptUsage(response);
@@ -542,6 +567,9 @@ export class AcpSdkBackend implements AgentBackend {
                         totalTokens: promptUsage.totalTokens,
                         thoughtTokens: promptUsage.thoughtTokens,
                         cacheReadTokens: promptUsage.cacheReadTokens,
+                        ...(promptUsage.cacheCreationTokens !== undefined
+                            ? { cacheCreationTokens: promptUsage.cacheCreationTokens }
+                            : {}),
                         contextTokens: latestUsageUpdate ? latestUsageUpdate.contextTokens : undefined,
                         contextWindow: latestUsageUpdate ? latestUsageUpdate.contextWindow : undefined
                     });
@@ -683,6 +711,10 @@ export class AcpSdkBackend implements AgentBackend {
      */
     get processingMessage(): boolean {
         return this.isProcessingMessage;
+    }
+
+    isPromptRequestInFlight(): boolean {
+        return this.promptRequestInFlight;
     }
 
     getLastSessionUpdateAt(): number {
@@ -999,6 +1031,12 @@ export class AcpSdkBackend implements AgentBackend {
                 ?? usage.cached_read_tokens
                 ?? usage.cachedInputTokens
                 ?? usage.cached_input_tokens
+            ) ?? undefined,
+            cacheCreationTokens: this.asFiniteNumber(
+                usage.cachedWriteTokens
+                ?? usage.cached_write_tokens
+                ?? usage.cacheCreationInputTokens
+                ?? usage.cache_creation_input_tokens
             ) ?? undefined
         };
     }

@@ -14,6 +14,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
+import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
 import { classifySessionAttention } from '@/lib/sessionAttention'
 import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
 import { useSessionRowTooltipIds } from '@/components/HoverTooltip'
@@ -40,6 +41,12 @@ type SessionGroup = {
     latestUpdatedAt: number
     hasActiveSession: boolean
 }
+
+const RUNNING_BUCKETS = [
+    { key: 'working', labelKey: 'session.item.running', colorClass: 'text-[var(--app-badge-success-text)]', pulse: true },
+    { key: 'pending', labelKey: 'session.item.pending', colorClass: 'text-[var(--app-badge-warning-text)]', pulse: true },
+    { key: 'idle', labelKey: 'session.item.idle', colorClass: 'text-[var(--app-hint)]', pulse: false },
+] as const
 
 export type SessionTimeRange = {
     start: number | null
@@ -764,9 +771,12 @@ function SessionItem(props: {
     api: ApiClient | null
     selected?: boolean
     showDetailedStatus?: boolean
+    inRunningSection?: boolean
+    projectLabel?: string
+    machineLabel?: string
 }) {
     const { t } = useTranslation()
-    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false } = props
+    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, inRunningSection = false, projectLabel, machineLabel } = props
     const { haptic } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -859,6 +869,9 @@ function SessionItem(props: {
                     nestedTooltips
                     attentionTooltipId={attentionId}
                     scheduleTooltipId={scheduleId}
+                    inRunningSection={inRunningSection}
+                    projectLabel={projectLabel}
+                    machineLabel={machineLabel}
                 />
             </button>
 
@@ -958,6 +971,24 @@ export function getPullToRefreshState(distancePx: number): PullToRefreshState {
     return 'idle'
 }
 
+export function getPullRefreshIndicatorRotation(state: PullToRefreshState): number {
+    return state === 'ready' ? 180 : 0
+}
+
+function PullRefreshIcon(props: { rotation: number }) {
+    return (
+        <svg
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 transition-transform duration-200"
+            viewBox="0 0 24 24"
+            fill="none"
+            style={{ transform: `rotate(${props.rotation}deg)` }}
+        >
+            <path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+    )
+}
+
 export function SessionList(props: {
     sessions: SessionSummary[]
     onSelect: (sessionId: string) => void
@@ -978,6 +1009,7 @@ export function SessionList(props: {
     const { sessionPreviewLimit } = useSessionPreviewLimit()
     const { sessionListStatusMode } = useSessionListStatusMode()
     const { showActiveSessionsOnly } = useShowActiveSessionsOnly()
+    const { pinInProgressSessions } = usePinInProgressSessions()
     const { machineFilter, setMachineFilter } = useSessionListMachineFilter()
     const showDetailedStatus = sessionListStatusMode === 'detailed'
     const [searchQuery, setSearchQuery] = useState('')
@@ -1066,13 +1098,48 @@ export function SessionList(props: {
             : visibleSessions.filter(session => (session.metadata?.machineId ?? UNKNOWN_MACHINE_ID) === activeMachineFilter),
         [visibleSessions, activeMachineFilter]
     )
+    const runningSessions = useMemo(() => {
+        const buckets: Record<'working' | 'pending' | 'idle', SessionSummary[]> = {
+            working: [],
+            pending: [],
+            idle: []
+        }
+        if (!pinInProgressSessions) {
+            return buckets
+        }
+        for (const session of machineFilteredSessions) {
+            if (!session.active) {
+                continue
+            }
+            if (session.thinking || (session.backgroundTaskCount ?? 0) > 0) {
+                buckets.working.push(session)
+            } else if ((session.pendingRequestsCount ?? 0) > 0) {
+                buckets.pending.push(session)
+            } else {
+                buckets.idle.push(session)
+            }
+        }
+        const byRecent = (a: SessionSummary, b: SessionSummary) => b.updatedAt - a.updatedAt
+        for (const key of Object.keys(buckets) as Array<keyof typeof buckets>) {
+            buckets[key].sort(byRecent)
+        }
+        return buckets
+    }, [machineFilteredSessions, pinInProgressSessions])
+    const runningSessionTotal = runningSessions.working.length
+        + runningSessions.pending.length
+        + runningSessions.idle.length
     const groups = useMemo(
-        () => groupSessionsByDirectory(machineFilteredSessions),
-        [machineFilteredSessions]
+        () => groupSessionsByDirectory(
+            pinInProgressSessions
+                ? machineFilteredSessions.filter((session) => !session.active)
+                : machineFilteredSessions
+        ),
+        [machineFilteredSessions, pinInProgressSessions]
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
+    const [runningSectionCollapsed, setRunningSectionCollapsed] = useState(false)
     const autoExpandedSelectedSessionKeyRef = useRef<string | null>(null)
     const isGroupCollapsed = (group: SessionGroup): boolean => {
         if (isFiltering) return false
@@ -1159,17 +1226,28 @@ export function SessionList(props: {
             return
         }
 
-        const group = allGroups.find(g =>
+        // Pinned "in progress" sessions are not rendered inside directory
+        // groups, so only auto-expand when the selected session actually lives
+        // in a visible group. Using `allGroups` here would expand the group
+        // below whenever a running session is opened.
+        const group = groups.find(g =>
             g.sessions.some(s => s.id === selectedSessionId)
         )
-        if (!group) return
+        if (!group) {
+            // The selected session is not rendered inside any directory group
+            // (e.g. it moved to the pinned "in progress" section). Drop the
+            // guard so it auto-expands again when it transitions back into a
+            // group later.
+            autoExpandedSelectedSessionKeyRef.current = null
+            return
+        }
 
         const autoExpandKey = `${selectedSessionId}::${group.key}`
         if (autoExpandedSelectedSessionKeyRef.current === autoExpandKey) return
         autoExpandedSelectedSessionKeyRef.current = autoExpandKey
 
         setCollapseOverrides(prev => expandSelectedSessionCollapseOverrides(prev, group))
-    }, [selectedSessionId, allGroups])
+    }, [selectedSessionId, groups])
 
     // Clean up stale collapse overrides
     useEffect(() => {
@@ -1372,7 +1450,9 @@ export function SessionList(props: {
                     aria-live="polite"
                     className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
                 >
-                    {isRefreshing || props.isLoading ? <Spinner size="sm" label={null} className="text-current" /> : null}
+                    {isRefreshing || props.isLoading
+                        ? <Spinner size="sm" label={null} className="text-current" />
+                        : <PullRefreshIcon rotation={getPullRefreshIndicatorRotation(pullState)} />}
                     <span>
                         {isRefreshing
                             ? t('sessions.refresh.refreshing')
@@ -1393,12 +1473,75 @@ export function SessionList(props: {
                     />
                 ) : null}
 
-                {props.sessions.length > 0 && (isFiltering || activeMachineFilter !== null) && groups.length === 0 ? (
+                {props.sessions.length > 0 && (isFiltering || activeMachineFilter !== null) && groups.length === 0 && runningSessionTotal === 0 ? (
                     <div className="px-4 py-8 text-center text-sm text-[var(--app-hint)]">
                         {t('sessions.search.noResults')}
                     </div>
                 ) : null}
 
+                {runningSessionTotal > 0 ? (
+                    <div key="running-section">
+                        <div
+                            className="group/running flex min-w-0 w-full select-none cursor-pointer items-center gap-2 rounded-lg py-1.5 pl-2 pr-2 transition-colors hover:bg-[var(--app-secondary-bg)]"
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={!runningSectionCollapsed || isFiltering}
+                            onClick={() => setRunningSectionCollapsed((value) => !value)}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    setRunningSectionCollapsed((value) => !value)
+                                }
+                            }}
+                            title={t('sessions.runningSection')}
+                        >
+                            <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={runningSectionCollapsed && !isFiltering} />
+                            <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center" aria-hidden="true">
+                                <span className="h-1.5 w-1.5 rounded-full bg-[var(--app-badge-success-text)] animate-pulse" />
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                                {t('sessions.runningSection')}
+                            </span>
+                            <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
+                                ({runningSessionTotal})
+                            </span>
+                        </div>
+                        <div className="collapsible-panel" data-open={(!runningSectionCollapsed || isFiltering) || undefined}>
+                            <div className="collapsible-inner">
+                            <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
+                                {RUNNING_BUCKETS.map((bucket) => {
+                                    const sessions = runningSessions[bucket.key]
+                                    if (sessions.length === 0) {
+                                        return null
+                                    }
+                                    return (
+                                        <div key={bucket.key}>
+                                            <div className={`flex items-center gap-1 px-1 pt-1 pb-0.5 text-[11px] font-medium ${bucket.colorClass}`}>
+                                                <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${bucket.pulse ? 'animate-pulse' : ''}`} aria-hidden="true" />
+                                                {t(bucket.labelKey)} ({sessions.length})
+                                            </div>
+                                            {sessions.map((s) => (
+                                                <SessionItem
+                                                    key={s.id}
+                                                    session={s}
+                                                    onSelect={props.onSelect}
+                                                    showPath={false}
+                                                    api={api}
+                                                    selected={s.id === selectedSessionId}
+                                                    showDetailedStatus={showDetailedStatus}
+                                                    inRunningSection
+                                                    projectLabel={getGroupDisplayName(s.metadata?.worktree?.basePath ?? s.metadata?.path ?? 'Other')}
+                                                    machineLabel={resolveMachineLabel(s.metadata?.machineId ?? null)}
+                                                />
+                                            ))}
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
                 {groups.map((group) => {
                     const isCollapsed = isGroupCollapsed(group)
                     const visibleGroupSessions = getVisibleGroupSessions(group)

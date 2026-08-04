@@ -16,6 +16,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         activeAt: 0,
         updatedAt: 0,
         metadata: null,
+        metadataVersion: 0,
+        agentStateVersion: 0,
+        todosUpdatedAt: 0,
         todoProgress: null,
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
@@ -56,6 +59,27 @@ describe('buildSessionReferenceText', () => {
     it('omits title when empty after normalization', () => {
         expect(buildSessionReferenceText('   \n\t  ', 'abc-def')).toBe(
             'See HAPI session /sessions/abc-def for context'
+        )
+    })
+
+    it('keeps combining and ZWJ title graphemes only when they fit the UTF-16 limit', () => {
+        const prefix = 'a'.repeat(119)
+        const combining = `${prefix}e\u0301x`
+        const family = `${prefix}👨\u200D👩\u200D👧\u200D👦x`
+
+        expect(buildSessionReferenceText(combining, 'combining')).toBe(
+            `See session ${JSON.stringify(prefix)} (/sessions/combining) for context`
+        )
+        expect(buildSessionReferenceText(family, 'family')).toBe(
+            `See session ${JSON.stringify(prefix)} (/sessions/family) for context`
+        )
+
+        const fittingFamilyPrefix = 'a'.repeat(120 - '👨\u200D👩\u200D👧\u200D👦'.length)
+        expect(buildSessionReferenceText(
+            `${fittingFamilyPrefix}👨\u200D👩\u200D👧\u200D👦x`,
+            'fitting-family'
+        )).toBe(
+            `See session ${JSON.stringify(`${fittingFamilyPrefix}👨\u200D👩\u200D👧\u200D👦`)} (/sessions/fitting-family) for context`
         )
     })
 })

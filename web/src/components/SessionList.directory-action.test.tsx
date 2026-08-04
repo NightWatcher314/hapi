@@ -10,6 +10,7 @@ import { SessionList } from './SessionList'
 afterEach(() => {
     cleanup()
     localStorage.removeItem('hapi-session-preview-limit')
+    localStorage.removeItem('hapi-pin-in-progress-sessions')
 })
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -19,6 +20,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         activeAt: 0,
         updatedAt: 0,
         metadata: null,
+        metadataVersion: 0,
+        agentStateVersion: 0,
+        todosUpdatedAt: 0,
         todoProgress: null,
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
@@ -371,6 +375,7 @@ describe('SessionList collapse behavior', () => {
     }
 
     it('keeps a selected running path collapsed across live session-list refreshes', async () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
         const baseSessions = [
             makeSession({
                 id: 'session-running',
@@ -388,9 +393,9 @@ describe('SessionList collapse behavior', () => {
         ]
         const { rerender } = render(renderSessionList(baseSessions))
 
-        expect(getProjectPanel().getAttribute('data-open')).toBe('true')
-
-        fireEvent.click(screen.getByTitle('/work/hapi'))
+        // The running session is pinned in the "in progress" section; the
+        // directory group now only holds inactive sessions and starts
+        // collapsed.
         expect(getProjectPanel().getAttribute('data-open')).toBeNull()
 
         rerender(renderSessionList([
@@ -407,12 +412,58 @@ describe('SessionList collapse behavior', () => {
         })
     })
 
-    it('auto-expands the path again when the selected session changes', async () => {
+    it('leaves active sessions in directory groups when pin-in-progress is off', () => {
         const sessions = [
             makeSession({
                 id: 'session-running',
                 active: true,
                 thinking: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-idle',
+                updatedAt: 50,
+                metadata: { path: '/work/other', name: 'Other task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, null))
+
+        expect(screen.queryByTitle('In progress')).toBeNull()
+        expect(screen.getByTitle('/work/hapi')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Running task/ })).toBeInTheDocument()
+        // Active group stays expanded by default so the project glance is immediate.
+        expect(screen.getByTitle('/work/hapi').nextElementSibling?.getAttribute('data-open')).toBe('true')
+    })
+
+    it('pins active sessions into In progress when the preference is on', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-idle',
+                updatedAt: 50,
+                metadata: { path: '/work/hapi', name: 'Idle task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions, null))
+
+        expect(screen.getByTitle('In progress')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Running task/ })).toBeInTheDocument()
+        // Directory group retains only the inactive session.
+        expect(getProjectPanel().getAttribute('data-open')).toBeNull()
+    })
+
+    it('auto-expands the path again when the selected session changes', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-first',
                 updatedAt: 100,
                 metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
             }),
@@ -424,14 +475,85 @@ describe('SessionList collapse behavior', () => {
         ]
         const { rerender } = render(renderSessionList(sessions))
 
-        fireEvent.click(screen.getByTitle('/work/hapi'))
+        // Inactive-only groups start collapsed; selecting a session inside
+        // one auto-expands it.
         expect(getProjectPanel().getAttribute('data-open')).toBeNull()
 
-        rerender(renderSessionList(sessions, 'session-next'))
+        rerender(renderSessionList([
+            ...sessions,
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 110,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+        ], 'session-next'))
 
         await waitFor(() => {
             expect(getProjectPanel().getAttribute('data-open')).toBe('true')
         })
+    })
+
+    it('keeps the running section open while searching even when collapsed', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-idle',
+                updatedAt: 50,
+                metadata: { path: '/work/hapi', name: 'Idle task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions))
+
+        const runningPanel = () => screen.getByTitle('In progress').nextElementSibling
+
+        expect(runningPanel()?.getAttribute('data-open')).toBe('true')
+        expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('true')
+
+        fireEvent.click(screen.getByTitle('In progress'))
+        expect(runningPanel()?.getAttribute('data-open')).toBeNull()
+        expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('false')
+
+        fireEvent.click(screen.getByRole('button', { name: 'Search sessions' }))
+        fireEvent.change(screen.getByPlaceholderText('Search sessions…'), {
+            target: { value: 'Running' },
+        })
+
+        expect(runningPanel()?.getAttribute('data-open')).toBe('true')
+        // The section stays reported open while searching even though the
+        // underlying collapsed state is still set.
+        expect(screen.getByTitle('In progress').getAttribute('aria-expanded')).toBe('true')
+    })
+
+    it('toggles the running section with the keyboard', () => {
+        localStorage.setItem('hapi-pin-in-progress-sessions', 'true')
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+        ]
+        render(renderSessionList(sessions))
+
+        const header = screen.getByRole('button', { name: /In progress/ })
+        expect(header.getAttribute('aria-expanded')).toBe('true')
+
+        fireEvent.keyDown(header, { key: 'Enter' })
+        expect(header.getAttribute('aria-expanded')).toBe('false')
+
+        fireEvent.keyDown(header, { key: ' ' })
+        expect(header.getAttribute('aria-expanded')).toBe('true')
     })
 
     it('keeps the previous selected path open when selection moves', async () => {

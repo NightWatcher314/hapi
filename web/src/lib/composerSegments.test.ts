@@ -7,6 +7,7 @@ import {
     insertSegmentsInComposerSegments,
     insertSessionMentionInComposerSegments,
     isRichComposerMentionsEnabled,
+    resolveComposerPlaceholderKey,
     mirrorComposerSegments,
     parseComposerSegments,
     serializeComposerSegments,
@@ -58,6 +59,19 @@ describe('serializeComposerSegments', () => {
             { type: 'session', id: '  ', title: 'orphan title' },
             { type: 'text', text: ' after' },
         ])).toBe('before  after')
+    })
+
+    it('keeps the 120 UTF-16-unit mention title limit without splitting an emoji', () => {
+        const title = `${'a'.repeat(119)}😀x`
+        const expectedTitle = 'a'.repeat(119)
+        expect(serializeComposerSegments([
+            { type: 'session', id: 'emoji-session', title },
+        ])).toBe(`[${expectedTitle}](/sessions/emoji-session)`)
+
+        const fittingTitle = `${'a'.repeat(118)}😀x`
+        expect(serializeComposerSegments([
+            { type: 'session', id: 'emoji-session', title: fittingTitle },
+        ])).toBe(`[${'a'.repeat(118)}😀](/sessions/emoji-session)`)
     })
 })
 
@@ -211,6 +225,29 @@ describe('isRichComposerMentionsEnabled', () => {
     })
 })
 
+describe('resolveComposerPlaceholderKey', () => {
+    it('prefers continue hint over mention copy', () => {
+        expect(resolveComposerPlaceholderKey({
+            richMentionsEnabled: true,
+            showContinueHint: true,
+        })).toBe('misc.typeMessage')
+    })
+
+    it('uses mention-aware placeholder when rich composer is on', () => {
+        expect(resolveComposerPlaceholderKey({
+            richMentionsEnabled: true,
+            showContinueHint: false,
+        })).toBe('misc.typeAMessageWithMentions')
+    })
+
+    it('keeps generic placeholder when rich composer is killed', () => {
+        expect(resolveComposerPlaceholderKey({
+            richMentionsEnabled: false,
+            showContinueHint: false,
+        })).toBe('misc.typeAMessage')
+    })
+})
+
 describe('serializeComposerSelection', () => {
     it('emits wire markdown with session ids for a chip selection', () => {
         const segments = parseComposerSegments('see [Peer A](/sessions/aaa) please')
@@ -226,6 +263,7 @@ describe('serializeComposerSelection', () => {
         const segments: ComposerSegment[] = [{ type: 'text', text: 'abc' }]
         expect(serializeComposerSelection(segments, { start: 1, end: 1 })).toBeNull()
     })
+
 })
 
 describe('insertSegmentsInComposerSegments', () => {
