@@ -231,13 +231,23 @@ export function withMcpJsonLock(lockPath: string, fn: () => void): void {
     }
 }
 
+function comparableMcpEnv(env?: Record<string, string>): string {
+    // Ignore the HAPI PID stamp (rewritten on install / crash-recovery), but
+    // treat any other env edit as a concurrent user change that must survive cleanup.
+    return JSON.stringify(
+        Object.entries(env ?? {})
+            .filter(([key]) => key !== HAPI_MCP_OVERLAY_PID_ENV)
+            .sort(([left], [right]) => left.localeCompare(right)),
+    );
+}
+
 function sameMcpEntry(a: McpServerEntry | undefined, b: McpServerEntry | undefined): boolean {
-    // Ownership is command+args. Env (PID stamp) may be rewritten or omitted by
-    // concurrent edits and must not block cleanup of our overlay entry.
     if (!a || !b) {
         return a === b;
     }
-    return a.command === b.command && JSON.stringify(a.args) === JSON.stringify(b.args);
+    return a.command === b.command
+        && JSON.stringify(a.args) === JSON.stringify(b.args)
+        && comparableMcpEnv(a.env) === comparableMcpEnv(b.env);
 }
 
 /**

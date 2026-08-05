@@ -5,14 +5,18 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer, type IncomingMessage } from "node:http";
-import { lstat, readFile } from "node:fs/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AddressInfo } from "node:net";
 import { z } from "zod";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
 import { randomUUID } from "node:crypto";
-import { detectImageMimeType, detectVideoMimeType, registerGeneratedImage } from "@/modules/common/generatedImages";
+import {
+    detectImageMimeType,
+    detectVideoMimeType,
+    readBoundedRegularFile,
+    registerGeneratedImage,
+} from "@/modules/common/generatedImages";
 import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from "@/modules/common/displayImagePrompt";
 import { resolveSkill } from "@/modules/common/skills";
@@ -115,16 +119,7 @@ function createHapiMcpServer(
         mediaKind: 'image' | 'video',
         toolName: 'display_image' | 'display_video'
     ) {
-        const info = await lstat(args.path);
-        if (!info.isFile()) {
-            throw new Error('Path is not a regular file');
-        }
-
-        if (info.size > maxInlineMediaBytes) {
-            throw new Error('File is too large to display inline');
-        }
-
-        const bytes = await readFile(args.path);
+        const bytes = await readBoundedRegularFile(args.path, maxInlineMediaBytes);
         const mimeType = mediaKind === 'video'
             ? detectVideoMimeType(bytes)
             : detectImageMimeType(bytes);

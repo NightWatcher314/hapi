@@ -159,6 +159,48 @@ describe('installCursorMcpOverlay', () => {
         expect(after.mcpServers[serverId]).toBeUndefined();
     });
 
+    it('preserves env-only concurrent edits on the overlay entry during cleanup', () => {
+        const cwd = makeProjectDir(JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+            },
+        }, null, 2));
+        const serverId = cursorHapiMcpServerId('session-env');
+        const mcpPath = join(cwd, '.cursor', 'mcp.json');
+        const handle = installCursorMcpOverlay(cwd, {
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+        }, { serverId, enableCursorMcp: noopEnable });
+
+        writeFileSync(mcpPath, JSON.stringify({
+            mcpServers: {
+                other: { command: 'echo', args: ['x'] },
+                [serverId]: {
+                    command: '/bin/hapi',
+                    args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+                    env: {
+                        [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid),
+                        USER_TOKEN: 'keep-me',
+                    },
+                },
+            },
+        }, null, 2) + '\n', 'utf-8');
+
+        handle.cleanup();
+
+        const after = JSON.parse(readFileSync(mcpPath, 'utf-8')) as {
+            mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
+        };
+        expect(after.mcpServers[serverId]).toEqual({
+            command: '/bin/hapi',
+            args: ['mcp', '--url', 'http://127.0.0.1:12345/'],
+            env: {
+                [HAPI_MCP_OVERLAY_PID_ENV]: String(process.pid),
+                USER_TOKEN: 'keep-me',
+            },
+        });
+    });
+
     it('restores a pre-existing entry for the same server id instead of deleting it', () => {
         const serverId = cursorHapiMcpServerId('session-a');
         const prior = { command: 'old-hapi', args: ['mcp'] };

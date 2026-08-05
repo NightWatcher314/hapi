@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { clearGeneratedImages, decodeGeneratedImageBase64, detectImageMimeType, detectVideoMimeType, getGeneratedImage, MAX_GENERATED_IMAGE_BASE64_CHARS, registerGeneratedImage, registerGeneratedImageFromAcpBlock, registerGeneratedImageFromPath, safeAcpFileName } from './generatedImages'
+import { clearGeneratedImages, decodeGeneratedImageBase64, detectImageMimeType, detectVideoMimeType, getGeneratedImage, MAX_GENERATED_IMAGE_BASE64_CHARS, MAX_GENERATED_IMAGE_BYTES, readBoundedRegularFile, registerGeneratedImage, registerGeneratedImageFromAcpBlock, registerGeneratedImageFromPath, safeAcpFileName } from './generatedImages'
 
 describe('generatedImages', () => {
     it('detects supported image MIME types from file bytes', () => {
@@ -153,6 +153,16 @@ describe('generatedImages', () => {
         const video = await registerGeneratedImageFromPath({ path })
         expect(video?.mimeType).toBe('video/mp4')
         clearGeneratedImages()
+    })
+
+    it('readBoundedRegularFile rejects oversize files without allocating the full path size', async () => {
+        const dir = join(tmpdir(), `hapi-bounded-read-${Date.now()}`)
+        mkdirSync(dir, { recursive: true })
+        const path = join(dir, 'big.bin')
+        writeFileSync(path, Buffer.alloc(1024, 0xab))
+
+        await expect(readBoundedRegularFile(path, 512)).rejects.toThrow(/too large/i)
+        await expect(readBoundedRegularFile(path, MAX_GENERATED_IMAGE_BYTES)).resolves.toHaveLength(1024)
     })
 
     it('safeAcpFileName rejects data URIs and strips signed URL query secrets', async () => {

@@ -1,8 +1,41 @@
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { lstat, readFile } from 'node:fs/promises'
+import { open } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { asString, isObject } from '@hapi/protocol'
+
+/**
+ * Read a regular file through one open descriptor: size is taken from the fd
+ * (not a separate pathname `lstat`), then the buffer is allocated to that size
+ * only. Rejects if the file grows/shrinks while reading so a TOCTOU swap cannot
+ * force an unbounded `readFile` allocation.
+ */
+export async function readBoundedRegularFile(path: string, maxBytes: number): Promise<Buffer> {
+    const handle = await open(path, 'r')
+    try {
+        const info = await handle.stat()
+        if (!info.isFile()) {
+            throw new Error('Path is not a regular file')
+        }
+        if (info.size > maxBytes) {
+            throw new Error('File is too large to display inline')
+        }
+        const bytes = Buffer.alloc(info.size)
+        for (let offset = 0; offset < bytes.length;) {
+            const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
+            if (bytesRead === 0) {
+                throw new Error('File changed while reading')
+            }
+            offset += bytesRead
+        }
+        if ((await handle.stat()).size !== info.size) {
+            throw new Error('File changed while reading')
+        }
+        return bytes
+    } finally {
+        await handle.close()
+    }
+}
 
 export type GeneratedImageMetadata = {
     id: string
@@ -213,14 +246,7 @@ export async function registerGeneratedImageFromPath(args: {
     fileName?: string | null
 }): Promise<GeneratedImageMetadata | null> {
     try {
-        const info = await lstat(args.path)
-        if (!info.isFile()) {
-            throw new Error('Path is not a regular file')
-        }
-        if (info.size > MAX_GENERATED_IMAGE_BYTES) {
-            throw new Error('Image is too large to display inline')
-        }
-        const bytes = await readFile(args.path)
+        const bytes = await readBoundedRegularFile(args.path, MAX_GENERATED_IMAGE_BYTES)
         const mimeType = detectImageMimeType(bytes) ?? detectVideoMimeType(bytes)
         if (!mimeType) {
             throw new Error('Unsupported inline media content')
