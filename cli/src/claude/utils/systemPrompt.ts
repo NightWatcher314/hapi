@@ -13,6 +13,7 @@ const BASE_SYSTEM_PROMPT = (() => trimIdent(`
     ${buildSessionCitationSteerInstruction({
         inspectTool: 'mcp__hapi__inspect_peer',
         pingTool: 'mcp__hapi__ping_peer',
+        listPeersTool: 'mcp__hapi__list_peers',
     })}
 `))();
 
