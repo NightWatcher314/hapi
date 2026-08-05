@@ -136,4 +136,4 @@ describe('runHappyMcpStdioBridge tool forwarding', () => {
         ])
     })
 
-}))
+})
