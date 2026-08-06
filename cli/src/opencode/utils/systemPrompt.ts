@@ -13,6 +13,7 @@ import {
     DISPLAY_VIDEO_PROMPT_HAPI_MCP,
 } from '@/modules/common/displayImagePrompt';
 import { SKILL_LOOKUP_INSTRUCTION } from '@/modules/common/skillLookupInstruction';
+import { withSessionSummaryInstruction } from '@/modules/common/sessionSummaryInstruction';
 
 /**
  * Title and display_image / display_video instructions for OpenCode to call the hapi MCP tools.
@@ -26,6 +27,10 @@ export const TITLE_INSTRUCTION = trimIdent(`
     })}
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
+
+export function getTitleInstruction(env: NodeJS.ProcessEnv = process.env): string {
+    return withSessionSummaryInstruction(TITLE_INSTRUCTION, env)
+}
 
 /**
  * Tool instructions for native ACP sessions. Title updates come from ACP, so
@@ -41,6 +46,10 @@ export const OPENCODE_NATIVE_TOOL_INSTRUCTION = trimIdent(`
     })}
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
+
+export function getOpencodeNativeToolInstruction(env: NodeJS.ProcessEnv = process.env): string {
+    return withSessionSummaryInstruction(OPENCODE_NATIVE_TOOL_INSTRUCTION, env)
+}
 
 /**
  * The system prompt to inject for OpenCode sessions.
