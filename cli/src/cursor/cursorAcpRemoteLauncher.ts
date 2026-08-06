@@ -206,7 +206,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         );
 
         const resumeSessionId = session.sessionId;
-        // Cursor ACP ignores session/new|load mcpServers; native .cursor/mcp.json is wired above.
+        // Cursor ACP ignores session/new|load mcpServers; native ~/.cursor/mcp.json is wired above.
         const mcpServerList: McpServerStdio[] = [];
         let acpSessionId: string | undefined;
 
@@ -408,7 +408,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
     protected async cleanup(): Promise<void> {
         // Capture overlay before awaited teardown so a reject from
-        // cancelAll/disconnect cannot leave a dead hapi-* entry in .cursor/mcp.json.
+        // cancelAll/disconnect cannot leave a dead hapi-* entry in ~/.cursor/mcp.json.
         const overlay = this.cursorMcpOverlay;
         this.cursorMcpOverlay = null;
 
