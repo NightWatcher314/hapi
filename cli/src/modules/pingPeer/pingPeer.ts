@@ -575,7 +575,10 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     if (deliveryMode === 'steer' && live.agentState?.controlledByUser && !live.metadata?.capabilities?.concurrentClients) {
         throw new PingPeerError('bad_args', 'Steering is only available for remote sessions; no message sent')
     }
-    if (deliveryMode === 'steer' && !live.thinking && !live.agentState?.steeringActive) {
+    const steeringActive = live.metadata?.flavor === 'pi'
+        ? live.thinking
+        : live.agentState?.steeringActive === true
+    if (deliveryMode === 'steer' && !steeringActive) {
         throw new PingPeerError('bad_args', 'Steering requires an active turn; target is idle, no message sent. Use queue to start a turn')
     }
 

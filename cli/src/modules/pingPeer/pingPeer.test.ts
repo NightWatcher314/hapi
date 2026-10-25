@@ -402,7 +402,8 @@ describe('pingPeer', () => {
 describe('pingPeer delivery modes', () => {
     const sessionId = 'aaaaaaaa-1111-1111-1111-111111111111'
     const active: PingPeerSessionSummary = {
-        id: sessionId, active: true, thinking: true, metadata: { flavor: 'codex' }
+        id: sessionId, active: true, thinking: true,
+        agentState: { steeringActive: true }, metadata: { flavor: 'codex' }
     }
 
     function setup(session = active, steerResult: MockResponse | Error = {
@@ -463,7 +464,7 @@ describe('pingPeer delivery modes', () => {
 
     it.each([
         { ...active, active: false },
-        { ...active, thinking: false },
+        { ...active, thinking: false, agentState: { steeringActive: false } },
         { ...active, metadata: { flavor: 'claude' } },
         { ...active, metadata: { flavor: 'cursor', cursorSessionProtocol: 'stream-json' as const } },
         { ...active, metadata: { flavor: 'cursor', cursorSessionId: 'legacy' } },
@@ -480,6 +481,35 @@ describe('pingPeer delivery modes', () => {
             metadata: { flavor: 'codex', capabilities: { concurrentClients: true } }
         })
         expect((await pingPeer({ ...options, deliveryMode: 'steer' })).delivery).toBe('steered')
+    })
+
+    it.each([
+        { flavor: 'codex', steeringActive: false },
+        { flavor: 'codex', steeringActive: undefined },
+        { flavor: 'cursor', steeringActive: false },
+        { flavor: 'cursor', steeringActive: undefined }
+    ])('does not send to a thinking $flavor peer with steeringActive=$steeringActive', async ({ flavor, steeringActive }) => {
+        const { http, options } = setup({
+            ...active, metadata: { flavor }, agentState: { steeringActive }
+        })
+        await expect(pingPeer({ ...options, deliveryMode: 'steer' })).rejects.toThrow(/no message sent/)
+        expect(http.post.mock.calls.map(([url]) => url)).toEqual(['http://hub.test/api/auth'])
+    })
+
+    it('uses thinking rather than steeringActive for an active Pi turn', async () => {
+        const { options } = setup({
+            ...active, agentState: { steeringActive: false },
+            metadata: { flavor: 'pi', piSessionId: 'pi-thread' }
+        })
+        expect((await pingPeer({ ...options, deliveryMode: 'steer' })).delivery).toBe('steered')
+    })
+
+    it('does not send to an idle Pi peer even if steeringActive is true', async () => {
+        const { http, options } = setup({
+            ...active, thinking: false, metadata: { flavor: 'pi', piSessionId: 'pi-thread' }
+        })
+        await expect(pingPeer({ ...options, deliveryMode: 'steer' })).rejects.toThrow(/no message sent/)
+        expect(http.post.mock.calls.map(([url]) => url)).toEqual(['http://hub.test/api/auth'])
     })
 
     it.each([
