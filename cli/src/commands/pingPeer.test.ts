@@ -30,4 +30,20 @@ describe('parsePingPeerArgs', () => {
     it('rejects unknown flags', () => {
         expect(() => parsePingPeerArgs(['--host', 'evil'])).toThrow(PingPeerError)
     })
+
+    it.each(['queue', 'steer'] as const)('parses delivery mode %s in both flag forms', (mode) => {
+        for (const flags of [['--delivery-mode', mode], [`--delivery-mode=${mode}`]]) {
+            expect(parsePingPeerArgs(['abc', 'hello', ...flags]).deliveryMode).toBe(mode)
+        }
+    })
+
+    it.each([
+        ['--delivery-mode'],
+        ['--delivery-mode='],
+        ['--delivery-mode', 'interrupt'],
+        ['--delivery-mode', '--list'],
+        ['--delivery-mode', 'queue', '--delivery-mode=steer']
+    ])('rejects invalid or repeated delivery flags: %j', (...flags) => {
+        expect(() => parsePingPeerArgs(['abc', 'hello', ...flags])).toThrow(PingPeerError)
+    })
 })

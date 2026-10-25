@@ -45,6 +45,24 @@ Choose a supported coding agent from your terminal and control its sessions remo
 - `hapi ping-peer <session-id-prefix> <message>` - Resume (if needed) and message another session. Prefer this or MCP `ping_peer` / `list_peers` over reinventing JWT+curl. Also `--message-file` / `--list`.
 - `hapi inspect-peer <session-id-or-prefix>` - Read-only peer metadata + recent message text (no resume). Prefer this or MCP `inspect_peer` when a user cites `[title](/sessions/<id>)` or Copy-reference `See session "…" (/sessions/<id>) for context`. `/sessions/<id>` is a hub path, not a local file. Optional `--limit`.
 
+Peer messages default to `queue`: wait for the next turn, or resume an inactive
+session. Use `--delivery-mode steer` to request insertion into an active Pi,
+Codex, or Cursor ACP turn. MCP `ping_peer` accepts the same optional
+`deliveryMode: "queue" | "steer"` field.
+
+```bash
+hapi ping-peer <session-id> 'Run the next check' --delivery-mode queue
+hapi ping-peer <session-id> 'Use the corrected input path' --delivery-mode steer
+```
+
+Steer rejects unsupported agents, idle targets, and inactive targets before
+sending. It reuses the queued-message Steer action: success reports `steered`,
+or `invoked` if the target consumed the message before the action arrived.
+If steering fails after the message was accepted, the error includes its
+`localId`; it may still be queued or already consumed. Inspect the target
+before retrying; do not automatically resend the prompt. Steering does not
+abort the current turn.
+
 The picker lists agents alphabetically by command name. Use Up/Down and Enter
 to choose; Esc or Ctrl-C cancels. It appears on every bare invocation, even
 when only one agent is available. No default agent or selection is saved.

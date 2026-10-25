@@ -8,8 +8,9 @@
  * Callers must not invent parallel auth or arbitrary hosts.
  */
 
+import { randomUUID } from 'node:crypto'
 import axios, { type AxiosInstance } from 'axios'
-import { extractAssistantPlainText, isObject } from '@hapi/protocol'
+import { extractAssistantPlainText, isObject, isSteeringSupportedForSession, type MessageDeliveryMode } from '@hapi/protocol'
 import { normalizeSessionIdPrefix } from '@hapi/protocol/sessionCitation'
 import { configuration } from '@/configuration'
 import { getAuthToken } from '@/api/auth'
@@ -38,6 +39,7 @@ export type PingPeerSessionSummary = {
     id: string
     active: boolean
     thinking?: boolean
+    agentState?: { steeringActive?: boolean; controlledByUser?: boolean } | null
     updatedAt?: number
     metadata?: {
         name?: string
@@ -45,6 +47,9 @@ export type PingPeerSessionSummary = {
         path?: string | null
         lifecycleState?: string | null
         piSessionId?: string
+        cursorSessionId?: string | null
+        cursorSessionProtocol?: 'acp' | 'stream-json' | null
+        capabilities?: { concurrentClients?: boolean }
         summary?: { text?: string } | null
     } | null
 }
@@ -52,6 +57,7 @@ export type PingPeerSessionSummary = {
 export type PingPeerOptions = {
     sessionIdPrefix: string
     message: string
+    deliveryMode?: MessageDeliveryMode
     waitActiveSecs?: number
     apiUrl?: string
     accessToken?: string
@@ -65,6 +71,7 @@ export type PingPeerResult = {
     sessionId: string
     name: string
     resumed: boolean
+    delivery: 'queued' | 'steered' | 'invoked'
 }
 
 export type ListPeerSessionsOptions = {
@@ -340,30 +347,70 @@ async function waitForPiReady(
     )
 }
 
+function unconfirmedSendError(localId: string, detail: string): PingPeerError {
+    return new PingPeerError(
+        'send_failed',
+        `Send not confirmed (localId=${localId}): ${detail}. ` +
+        'The message may have been accepted; inspect the target before retrying. Do not resend automatically.'
+    )
+}
+
 async function sendMessage(
     apiUrl: string,
     jwt: string,
     sessionId: string,
     message: string,
-    http: AxiosInstance
-): Promise<void> {
+    http: AxiosInstance,
+    deliveryMode: MessageDeliveryMode
+): Promise<PingPeerResult['delivery']> {
+    // The existing queued-message steer action accepts localId as well as id.
+    // Keep queue delivery on the existing path; a steer needs an ackable row.
+    const localId = deliveryMode === 'steer' ? randomUUID() : undefined
     const response = await http.post(
         `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
-        { text: message },
+        { text: message, ...(localId ? { localId } : {}) },
         {
             headers: authHeaders(jwt),
             timeout: 30_000,
             validateStatus: () => true
         }
-    )
+    ).catch((error: unknown) => {
+        if (!localId) throw error
+        const detail = error instanceof Error ? error.message : String(error)
+        throw unconfirmedSendError(localId, detail)
+    })
     if (response.status >= 200 && response.status < 300 && response.data?.ok === true) {
-        return
+        if (!localId) return 'queued'
+        try {
+            const steer = await http.post(
+                `${apiUrl}/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(localId)}/steer`,
+                {},
+                { headers: authHeaders(jwt), timeout: 30_000, validateStatus: () => true }
+            )
+            if (steer.status >= 200 && steer.status < 300) {
+                if (steer.data?.status === 'steered') return 'steered'
+                // The target consumed the message before the steer request.
+                // Do not claim it was inserted into the active turn.
+                if (steer.data?.status === 'invoked') return 'invoked'
+            }
+            throw new Error(typeof steer.data?.error === 'string' ? steer.data.error : `HTTP ${steer.status}`)
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error)
+            throw new PingPeerError(
+                'send_failed',
+                `Message accepted (localId=${localId}), but steer was not confirmed: ${detail}. ` +
+                'It may remain queued or already be consumed; inspect the target before retrying. Do not resend automatically.'
+            )
+        }
     }
     const detail = typeof response.data?.error === 'string'
         ? response.data.error
         : typeof response.data?.code === 'string'
             ? response.data.code
             : `HTTP ${response.status}`
+    if (localId) {
+        throw unconfirmedSendError(localId, detail)
+    }
     throw new PingPeerError('send_failed', `send failed: ${detail}`)
 }
 
@@ -464,6 +511,10 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
     if (!message) {
         throw new PingPeerError('bad_args', 'message is required')
     }
+    const deliveryMode = options.deliveryMode ?? 'queue'
+    if (deliveryMode !== 'queue' && deliveryMode !== 'steer') {
+        throw new PingPeerError('bad_args', 'deliveryMode must be queue or steer')
+    }
 
     const waitActiveSecs = options.waitActiveSecs ?? DEFAULT_WAIT_ACTIVE_SECS
     if (!Number.isFinite(waitActiveSecs) || waitActiveSecs <= 0) {
@@ -488,6 +539,9 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
         const session = await getSession(apiUrl, jwt, matched.id, http)
         if (session.active) {
             return session
+        }
+        if (deliveryMode === 'steer') {
+            throw new PingPeerError('bad_args', 'Steering requires an active turn; target is inactive, no message sent. Use queue to resume it')
         }
         onProgress?.(progressMessage)
         await resumeSession(apiUrl, jwt, matched.id, http)
@@ -515,13 +569,24 @@ export async function pingPeer(options: PingPeerOptions): Promise<PingPeerResult
         }
     }
 
-    onProgress?.(`sending message (${message.length} chars)...`)
-    await sendMessage(apiUrl, jwt, matched.id, message, http)
+    if (deliveryMode === 'steer' && !isSteeringSupportedForSession(live.metadata)) {
+        throw new PingPeerError('bad_args', 'Steering is only supported for Pi, Codex, and Cursor ACP sessions; no message sent')
+    }
+    if (deliveryMode === 'steer' && live.agentState?.controlledByUser && !live.metadata?.capabilities?.concurrentClients) {
+        throw new PingPeerError('bad_args', 'Steering is only available for remote sessions; no message sent')
+    }
+    if (deliveryMode === 'steer' && !live.thinking && !live.agentState?.steeringActive) {
+        throw new PingPeerError('bad_args', 'Steering requires an active turn; target is idle, no message sent. Use queue to start a turn')
+    }
+
+    onProgress?.(`sending message (${message.length} chars, ${deliveryMode})...`)
+    const delivery = await sendMessage(apiUrl, jwt, matched.id, message, http, deliveryMode)
 
     return {
         sessionId: matched.id,
         name,
-        resumed
+        resumed,
+        delivery
     }
 }
 
