@@ -8,6 +8,7 @@ import { registerKillSessionHandler } from '@/claude/registerKillSessionHandler'
 import { PiNativeTransport, type PiNativeEvent } from './native/transport';
 import { PiNativeSessionBridge, type PiNativeState } from './native/session';
 import { materializePiTitleExtension } from './titleExtension';
+import type { SessionEndReason } from '@hapi/protocol';
 
 export type PiLaunchOptions = {
     startedBy?: 'runner' | 'terminal';
@@ -45,19 +46,19 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
     let resolveClosed!: () => void;
     const closed = new Promise<void>(resolve => { resolveClosed = resolve; });
 
-    const retireBinding = async (reason: string) => {
+    const retireBinding = async (reason: string, endReason: SessionEndReason = 'completed') => {
         binding?.deactivate();
         binding = null;
         const previous = lifecycle;
         lifecycle = null;
         if (previous) {
             previous.setArchiveReason(reason);
-            previous.setSessionEndReason('completed');
+            previous.setSessionEndReason(endReason);
             await previous.cleanup();
         }
     };
 
-    const stop = async (code: number, reason: string) => {
+    const stop = async (code: number, reason: string, endReason: SessionEndReason = code === 0 ? 'completed' : 'error') => {
         if (stopping) return;
         stopping = true;
         exitCode = code;
@@ -66,7 +67,7 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
         transport.kill();
         try {
             await eventChain.catch(() => {});
-            await retireBinding(reason);
+            await retireBinding(reason, endReason);
         } catch (error) {
             exitCode = 1;
             logger.debug('[pi-native] Cleanup failed:', error);
@@ -105,7 +106,7 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
         registerKillSessionHandler(bootstrap.session.rpcHandlerManager, {
             cleanupAndExit: async () => {
                 if (binding !== current) throw new Error('This Pi conversation is no longer active');
-                await stop(0, 'User terminated');
+                await stop(0, 'User terminated', 'terminated');
             },
         }, bootstrap.session);
         await current.initialize(state, replayHistory);
@@ -159,12 +160,13 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
     transport.onClose((code, signal) => {
         void stop(code ?? (signal ? 1 : 0), signal ? `Pi terminated by ${signal}` : 'Pi terminal closed');
     });
-    const onTerminate = () => { void stop(0, 'User terminated'); };
+    const onInterrupt = () => { void stop(0, 'User terminated', 'terminated'); };
+    const onTerminate = () => { void stop(0, 'Hub restart', 'terminated'); };
     const onCrash = (error: unknown) => {
         logger.debug('[pi-native] Wrapper crashed:', error);
         void stop(1, 'Pi bridge crashed');
     };
-    process.on('SIGINT', onTerminate);
+    process.on('SIGINT', onInterrupt);
     process.on('SIGTERM', onTerminate);
     process.on('uncaughtException', onCrash);
     process.on('unhandledRejection', onCrash);
@@ -173,7 +175,7 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
         await closed;
     } finally {
         stopping = true;
-        process.off('SIGINT', onTerminate);
+        process.off('SIGINT', onInterrupt);
         process.off('SIGTERM', onTerminate);
         process.off('uncaughtException', onCrash);
         process.off('unhandledRejection', onCrash);
