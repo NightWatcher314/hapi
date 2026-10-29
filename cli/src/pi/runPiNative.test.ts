@@ -115,4 +115,21 @@ describe('Pi native HAPI binding lifecycle', () => {
         await vi.waitFor(() => expect(mocks.initialize).toHaveBeenCalledTimes(2));
         expect(mocks.bootstrap).toHaveBeenCalledTimes(2);
     });
+
+    it('cleans the native child and HAPI binding after a wrapper-level crash', async () => {
+        const baseline = new Set(process.listeners('uncaughtException'));
+        running = runPiNative({ workingDirectory: '/tmp' });
+        await vi.waitFor(() => expect(mocks.event).toBeTypeOf('function'));
+        mocks.event?.(start('native-1', 1));
+        await vi.waitFor(() => expect(mocks.initialize).toHaveBeenCalledOnce());
+        const crash = process.listeners('uncaughtException').find(listener => !baseline.has(listener));
+        expect(crash).toBeTypeOf('function');
+        const result = running.catch(error => error as Error);
+        running = undefined;
+        crash!(new Error('test wrapper crash'), 'uncaughtException');
+        await expect(result).resolves.toMatchObject({ message: 'Pi native session exited with code 1' });
+        expect(mocks.kill).toHaveBeenCalled();
+        expect(mocks.cleanup).toHaveBeenCalledOnce();
+        expect(process.listeners('uncaughtException')).not.toContain(crash);
+    });
 });

@@ -160,8 +160,14 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
         void stop(code ?? (signal ? 1 : 0), signal ? `Pi terminated by ${signal}` : 'Pi terminal closed');
     });
     const onTerminate = () => { void stop(0, 'User terminated'); };
+    const onCrash = (error: unknown) => {
+        logger.debug('[pi-native] Wrapper crashed:', error);
+        void stop(1, 'Pi bridge crashed');
+    };
     process.on('SIGINT', onTerminate);
     process.on('SIGTERM', onTerminate);
+    process.on('uncaughtException', onCrash);
+    process.on('unhandledRejection', onCrash);
     try {
         await transport.start();
         await closed;
@@ -169,6 +175,8 @@ export async function runPiNative(options: PiLaunchOptions): Promise<void> {
         stopping = true;
         process.off('SIGINT', onTerminate);
         process.off('SIGTERM', onTerminate);
+        process.off('uncaughtException', onCrash);
+        process.off('unhandledRejection', onCrash);
         transport.kill();
         await eventChain.catch(() => {});
         await retireBinding('Pi terminal closed');
